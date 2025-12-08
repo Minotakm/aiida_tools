@@ -59,3 +59,46 @@ def get_file_content(
 
     except Exception as e:
         return f"[Error reading file: {e}]"
+
+
+def get_input_files(node: CalcJobNode) -> list[str]:
+    """List available input files from the repository folder.
+
+    Returns list of filenames that are commonly useful.
+    """
+    available_files = []
+
+    try:
+        # Check for raw input folder
+        if hasattr(node, "base") and hasattr(node.base, "repository"):
+            repo_files = node.base.repository.list_object_names()
+            # Common input files
+            common_inputs = [
+                "aiida.in",
+                "_aiidasubmit.sh",
+                ".aiida/job_tmpl.json",
+                ".aiida/calcinfo.json",
+            ]
+            available_files = [f for f in common_inputs if f in repo_files]
+    except Exception:
+        pass
+
+    return available_files
+
+
+def get_input_file_content(node: CalcJobNode, filename: str) -> str:
+    """Get content of an input file from the repository.
+
+    Args:
+        node: The calculation node
+        filename: Name of file to retrieve
+
+    Returns formatted string with file content
+    """
+    try:
+        if hasattr(node, "base") and hasattr(node.base, "repository"):
+            content = node.base.repository.get_object_content(filename)
+            return content
+        return "[Repository not accessible]"
+    except Exception as e:
+        return f"[Error reading file: {e}]"

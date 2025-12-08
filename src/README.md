@@ -7,8 +7,11 @@ A Terminal User Interface (TUI) for browsing AiiDA groups, nodes, and inspecting
 - Browse AiiDA groups
 - View nodes within groups
 - Navigate through process descendants
-- View output files (aiida.out, scheduler outputs)
+- View output files (aiida.out, scheduler outputs) and input files (aiida.in, _aiidasubmit.sh)
 - Adjust preview lines dynamically
+- **Tag and categorize errors** - Find error patterns and automatically tag all matching calculations
+- Sort failed/problematic calculations at the top
+- Persistent tags stored in `~/.aiida_tui_tags.json`
 
 ## Requirements
 
@@ -34,11 +37,11 @@ python src/main.py 123  # by PK
 | Key | Action | Description |
 |-----|--------|-------------|
 | `a` | Select | Select group/node and drill down |
-| `v` | View Files | View output files of selected calculation |
 | `b` | Back | Go back to previous view |
 | `r` | Refresh | Reload current view |
-| `+` | More lines | Increase preview lines (+20) |
-| `-` | Fewer lines | Decrease preview lines (-20) |
+| `m` | More lines | Increase preview lines for output files |
+| `l` | Fewer lines | Decrease preview lines for output files |
+| `t` | Tag Error | Tag current calculation and scan for similar errors |
 | `q` | Quit | Exit the application |
 
 ### Workflow
@@ -46,7 +49,27 @@ python src/main.py 123  # by PK
 1. **Groups View** - Browse all AiiDA core groups
 2. **Nodes View** - Select a group (`a`) to see all nodes
 3. **Descendants View** - Select a node (`a`) to see called processes
-4. **Files View** - Press `v` on any CalcJob to view output files
+4. **File List View** - Select a CalcJob (`a`) to see available files
+5. **File View** - Select a file (`a`) to view its content
+
+## Error Tagging Workflow
+
+The tagging feature helps you categorize and track calculations with similar errors:
+
+1. **Find an error** - Navigate to a failed CalcJob and view its output file
+2. **Press `t`** - Opens tag dialog
+3. **Enter tag name** - Give it a descriptive name (e.g., "memory_error", "scf_not_converged")
+4. **Enter search pattern** - Type the error message or pattern to search for (e.g., "OOM", "convergence not achieved")
+5. **Automatic scan** - The TUI scans all CalcJobs in the current scope (group or workchain) and tags matching ones
+6. **View tags** - Tagged calculations show their tag in the "Tag" column
+7. **Tags persist** - Tags are saved to `~/.aiida_tui_tags.json` and persist across sessions
+
+**Example use case:**
+- You have 500 failed calculations
+- You spot "BFGS history already reset" in one output
+- Press `t`, enter tag "bfgs_error" and pattern "BFGS history already reset"
+- All 47 calculations with this error are now tagged
+- You can visually identify and track this error category
 
 ## File Structure
 
@@ -58,11 +81,20 @@ src/
 └── node_inspector.py    # File inspection utilities
 ```
 
-## Output Files Displayed
+## Files Displayed
 
-When viewing files (`v`), the TUI shows the **last N lines** (default: 50) of:
-- `aiida.out` - Main calculation output
+The TUI shows both input and output files:
+
+**Output files** (from retrieved folder):
+- `aiida.out` - Main calculation output (last N lines shown, default: 500)
 - `_scheduler-stdout.txt` - Scheduler standard output
+- `_scheduler-stderr.txt` - Scheduler error output
+
+**Input files** (from repository, full file shown):
+- `aiida.in` - Input file submitted to the code
+- `_aiidasubmit.sh` - Submission script
+
+Use `m` and `l` keys to adjust the number of preview lines for output files.
 - `_scheduler-stderr.txt` - Scheduler standard error
 
 Use `+`/`-` to adjust how many lines are shown (increments of 20).
