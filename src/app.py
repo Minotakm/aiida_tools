@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 from typing import Optional
 
@@ -144,6 +145,7 @@ class GroupNodesApp(App):
         Binding("m", "increase_preview", "More lines", show=True),
         Binding("l", "decrease_preview", "Fewer lines", show=True),
         Binding("t", "tag_error", "Tag Error", show=True),
+        Binding("u", "update_tags", "Update Tags", show=True),
     ]
 
     def __init__(self, group_identifier: str | None = None, **kwargs) -> None:
@@ -182,7 +184,26 @@ class GroupNodesApp(App):
         # Error tagging - save in current working directory
         self.tags_file = Path.cwd() / ".aiida_tui_tags.json"
         self.tags: dict[int, str] = {}  # Map node PK to tag name
+        self.categorized_file = Path.cwd() / ".aiida_tui_categorized.json"
+        self.categorized_workchains: set[int] = (
+            set()
+        )  # Set of PKs that have been tagged (globally)
+        self.patterns_file = Path.cwd() / ".aiida_tui_patterns.json"
+        self.error_patterns: dict[str, dict[str, str]] = (
+            {}
+        )  # Map tag_name -> {"filename": ..., "pattern": ...}
         self.load_tags()
+        self.load_categorized()
+        self.load_patterns()
+
+        # Setup logging for debugging
+        self.log_file = Path.cwd() / ".aiida_tui_debug.log"
+        logging.basicConfig(
+            filename=str(self.log_file),
+            level=logging.DEBUG,
+            format="%(asctime)s - %(message)s",
+        )
+        logging.info(f"=== TUI Started - Log file: {self.log_file} ===")
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -205,20 +226,74 @@ class GroupNodesApp(App):
         if self.tags_file.exists():
             try:
                 with open(self.tags_file, "r") as f:
-                    # Convert string keys back to int
                     data = json.load(f)
-                    self.tags = {int(k): v for k, v in data.items()}
+                    # Check format: if first key is numeric, it's old format {pk: tag_name}
+                    # New format is {tag_name: [pk1, pk2, ...]}
+                    if data and next(iter(data)).isdigit():
+                        # Old format - convert to new internal format
+                        self.tags = {int(k): v for k, v in data.items()}
+                    else:
+                        # New format - convert to internal format {pk: tag_name}
+                        self.tags = {}
+                        for tag_name, pks in data.items():
+                            for pk in pks:
+                                self.tags[int(pk)] = tag_name
             except (json.JSONDecodeError, ValueError):
                 self.tags = {}
         else:
             self.tags = {}
 
     def save_tags(self) -> None:
-        """Save tags to JSON file."""
+        """Save tags to JSON file in format {tag_name: [pk1, pk2, ...]}."""
+        # Convert from internal {pk: tag_name} to {tag_name: [pks...]}
+        tag_to_pks: dict[str, list[int]] = {}
+        for pk, tag_name in self.tags.items():
+            if tag_name not in tag_to_pks:
+                tag_to_pks[tag_name] = []
+            tag_to_pks[tag_name].append(pk)
+        
+        # Sort PKs within each tag
+        for tag_name in tag_to_pks:
+            tag_to_pks[tag_name].sort()
+        
         with open(self.tags_file, "w") as f:
-            # Convert int keys to string for JSON
-            data = {str(k): v for k, v in self.tags.items()}
+            json.dump(tag_to_pks, f, indent=2)
+
+    def load_categorized(self) -> None:
+        """Load set of categorized (tagged) workchain PKs from JSON file."""
+        if self.categorized_file.exists():
+            try:
+                with open(self.categorized_file, "r") as f:
+                    data = json.load(f)
+                    self.categorized_workchains = set(int(pk) for pk in data)
+            except (json.JSONDecodeError, ValueError) as e:
+                logging.error(f"Error loading categorized file: {e}")
+                self.categorized_workchains = set()
+        else:
+            self.categorized_workchains = set()
+
+    def save_categorized(self) -> None:
+        """Save set of categorized (tagged) workchain PKs to JSON file."""
+        with open(self.categorized_file, "w") as f:
+            data = sorted(list(self.categorized_workchains))
             json.dump(data, f, indent=2)
+
+    def load_patterns(self) -> None:
+        """Load error patterns from JSON file."""
+        if self.patterns_file.exists():
+            try:
+                with open(self.patterns_file, "r") as f:
+                    self.error_patterns = json.load(f)
+            except (json.JSONDecodeError, ValueError) as e:
+                logging.error(f"Error loading patterns file: {e}")
+                self.error_patterns = {}
+        else:
+            self.error_patterns = {}
+
+    def save_patterns(self) -> None:
+        """Save error patterns to JSON file."""
+        with open(self.patterns_file, "w") as f:
+            json.dump(self.error_patterns, f, indent=2)
 
     def show_group_list(self) -> None:
         """Populate the table with available groups."""
@@ -730,48 +805,148 @@ class GroupNodesApp(App):
 
         self.push_screen(TagNameScreen(), on_tag_name_result)
 
+    def action_update_tags(self) -> None:
+        """Re-scan and auto-tag workchains using previously saved error patterns."""
+        if not self.group:
+            if self.title_widget:
+                self.title_widget.update(
+                    "[b red]No group selected. Navigate to a group first.[/b red]"
+                )
+            return
+
+        if not self.error_patterns:
+            if self.title_widget:
+                self.title_widget.update(
+                    "[b yellow]No error patterns saved yet. Use 't' to create tags first.[/b yellow]"
+                )
+            return
+
+        # Show progress and start scanning
+        if self.title_widget:
+            self.title_widget.update(
+                f"[b yellow]Re-scanning with {len(self.error_patterns)} saved patterns...[/b yellow]"
+            )
+
+        total_newly_tagged = 0
+        summary_parts = []
+
+        # Scan with each saved pattern
+        for tag_name, pattern_info in self.error_patterns.items():
+            filename = pattern_info["filename"]
+            pattern = pattern_info["pattern"]
+
+            logging.info(
+                f"Re-scanning for tag '{tag_name}' with pattern '{pattern}' in file '{filename}'"
+            )
+
+            # Reuse the existing scan method
+            initial_count = len(self.tags)
+            self.scan_and_tag_father_workchains(tag_name, pattern, filename)
+            newly_tagged = len(self.tags) - initial_count
+            total_newly_tagged += newly_tagged
+
+            if newly_tagged > 0:
+                summary_parts.append(f"{newly_tagged} '{tag_name}'")
+
+        # Show final summary
+        if self.title_widget:
+            if total_newly_tagged > 0:
+                summary = ", ".join(summary_parts)
+                self.title_widget.update(
+                    f"[b green]Re-scan complete! Newly tagged: {summary}[/b green]"
+                )
+            else:
+                self.title_widget.update(
+                    f"[b green]Re-scan complete! No new workchains matched the patterns.[/b green]"
+                )
+
     def scan_and_tag_father_workchains(
         self, tag_name: str, pattern: str, filename: str
     ) -> None:
         """Scan all father workchains in group and tag those with the error pattern."""
         tagged_count = 0
-        scanned_count = 0
         total_failed_calcs = 0
 
-        # Get all WorkChainNodes in the group that failed
-        results = get_nodes_in_group(self.group.label)
+        qb = orm.QueryBuilder()
+        qb.append(orm.Group, filters={"label": self.group.label}, tag="group")
+        qb.append(
+            orm.WorkChainNode,
+            with_group="group",
+            filters={
+                "and": [
+                    {"attributes.exit_status": {"!==": 0}},
+                    {"attributes.process_state": "finished"},
+                ]
+            },
+            project=["*"],
+        )
 
-        for pk, *_ in results:
+        failed_workchains = qb.all(flat=True)
+        scanned_count = len(failed_workchains)
+
+        # Filter out already categorized (tagged) workchains globally
+        uncategorized_workchains = [
+            wc for wc in failed_workchains if wc.pk not in self.categorized_workchains
+        ]
+        skipped_count = scanned_count - len(uncategorized_workchains)
+
+        logging.info(
+            f"Tag '{tag_name}': Total failed workchains: {scanned_count}, Already tagged (globally): {skipped_count}, To scan: {len(uncategorized_workchains)}"
+        )
+
+        for idx, workchain in enumerate(uncategorized_workchains, 1):
             try:
-                node = orm.load_node(pk)
-
-                # Only check WorkChainNodes (father workchains)
-                if not isinstance(node, orm.WorkChainNode):
-                    continue
-
-                # Only check failed workchains
-                if hasattr(node, "exit_status") and (
-                    node.exit_status is None or node.exit_status == 0
-                ):
-                    continue
-
-                scanned_count += 1
+                # Update progress every 10 workchains
+                if idx % 10 == 0 and self.title_widget:
+                    self.title_widget.update(
+                        f"[b yellow]Scanning... {idx}/{len(uncategorized_workchains)} workchains (skipped {skipped_count})[/b yellow]"
+                    )
 
                 # Check if this workchain has the error pattern
                 has_error, num_failed = self.workchain_has_error_fast(
-                    node, pattern, filename
+                    workchain, pattern, filename
                 )
                 total_failed_calcs += num_failed
 
                 if has_error:
-                    self.tags[pk] = tag_name
+                    self.tags[workchain.pk] = tag_name
                     tagged_count += 1
 
+                    # Mark as categorized globally (will be skipped in all future scans)
+                    self.categorized_workchains.add(workchain.pk)
+                    logging.info(
+                        f"Tagged workchain {workchain.pk} with '{tag_name}' and marked as categorized"
+                    )
+
+                    # Debug: show which workchain was tagged
+                    if self.title_widget:
+                        self.title_widget.update(
+                            f"[b green]Tagged workchain {workchain.pk}[/b green]"
+                        )
+                else:
+                    logging.debug(
+                        f"Workchain {workchain.pk} - pattern not found, will check in next scan"
+                    )
+
             except Exception as e:
+                # Don't mark as categorized if there was an error - allow retry in next scan
+                logging.error(
+                    f"Error on workchain {workchain.pk}: {str(e)} - will retry in next scan"
+                )
+                # Debug: show if there's an exception
+                if self.title_widget:
+                    self.title_widget.update(
+                        f"[b red]Error on workchain {workchain.pk}: {str(e)}[/b red]"
+                    )
                 continue
 
-        # Save tags to file
+        # Save pattern for this tag for future re-scans
+        self.error_patterns[tag_name] = {"filename": filename, "pattern": pattern}
+        self.save_patterns()
+
+        # Save tags and categorized workchains to file
         self.save_tags()
+        self.save_categorized()
 
         # Go back to nodes view to show updated tags
         while self.mode != "nodes":
@@ -783,7 +958,7 @@ class GroupNodesApp(App):
         # Show notification
         if self.title_widget:
             self.title_widget.update(
-                f"[b green]Scanned {scanned_count} workchains, {total_failed_calcs} failed calcs, tagged {tagged_count} with '{tag_name}'[/b green]"
+                f"[b green]Scanned {len(uncategorized_workchains)} workchains (skipped {skipped_count}), {total_failed_calcs} calcs checked, tagged {tagged_count} with '{tag_name}'[/b green]"
             )
 
     def workchain_has_error_fast(
@@ -793,7 +968,7 @@ class GroupNodesApp(App):
         Returns (has_error, num_failed_calcs_checked).
         """
         try:
-            # Step 1: Find failed child workchains using QueryBuilder
+            # OPTIMIZED: Query following the hierarchy: father -> failed child workchains -> last CalcJob
             qb = orm.QueryBuilder()
             qb.append(
                 orm.WorkChainNode,
@@ -804,49 +979,41 @@ class GroupNodesApp(App):
                 orm.WorkChainNode,
                 with_incoming="father",
                 filters={"attributes.exit_status": {"!==": 0}},
-                tag="failed_wc",
-                project=["*"],
+                tag="child_wc",
+            )
+            qb.append(
+                orm.CalcJobNode,
+                with_incoming="child_wc",
+                project=["*", "ctime"],
+                tag="calcjob",
             )
 
-            failed_workchains = qb.all(flat=True)
+            # Order by CalcJob creation time descending to get the most recent first
+            qb.order_by({"calcjob": {"ctime": "desc"}})
+            qb.limit(1)
 
-            # If no failed child workchains, check CalcJobs directly under father
-            if not failed_workchains:
-                # Check CalcJobs directly under the father workchain
-                failed_calcs = [
-                    node
-                    for node in workchain.called_descendants
-                    if isinstance(node, orm.CalcJobNode)
-                    and hasattr(node, "exit_status")
-                    and node.exit_status
-                    and node.exit_status != 0
-                ]
-            else:
-                # Step 2: Get CalcJobs from failed child workchains
-                failed_calcs = []
-                for failed_wc in failed_workchains:
-                    calcs = [
-                        node
-                        for node in failed_wc.called_descendants
-                        if isinstance(node, orm.CalcJobNode)
-                    ]
-                    failed_calcs.extend(calcs)
+            result = qb.all()
 
-            num_failed = len(failed_calcs)
+            if not result:
+                logging.debug(f"WC {workchain.pk}: No failed CalcJob found")
+                return False, 1  # Still count as 1 attempt even if no CalcJob found
 
-            if not failed_calcs:
-                return False, 0
+            # Get the most recent CalcJob
+            calc_node = result[0][0]
+            logging.debug(
+                f"WC {workchain.pk}: Checking CalcJob {calc_node.pk} for pattern '{pattern}' in file '{filename}'"
+            )
 
-            # Step 3: For each failed CalcJob, check the pattern in the specific file
-            for calc_node in failed_calcs:
-                try:
-                    if self.search_pattern_in_file(calc_node, pattern, filename):
-                        return True, num_failed
-                except Exception as e:
-                    # Continue checking other nodes if one fails
-                    continue
+            # Check pattern in the last CalcJob
+            found = self.search_pattern_in_file(calc_node, pattern, filename)
+            logging.debug(
+                f"WC {workchain.pk}: CalcJob {calc_node.pk} - Pattern found: {found}"
+            )
 
-            return False, num_failed
+            if found:
+                return True, 1
+
+            return False, 1
         except Exception as e:
             # Log error but don't crash
             return False, 0
@@ -856,19 +1023,39 @@ class GroupNodesApp(App):
     ) -> bool:
         """Search for pattern in a specific file of the node."""
         try:
+            pattern_lower = pattern.lower()
+
             # Check if it's an output file
-            if filename in get_retrieved_files(node):
+            retrieved_files = get_retrieved_files(node)
+            logging.debug(f"CalcJob {node.pk}: Retrieved files: {retrieved_files}")
+
+            if filename in retrieved_files:
                 content = get_file_content(
-                    node, filename, head_lines=0, tail_lines=10000
+                    node, filename, head_lines=0, tail_lines=2000
                 )
-                return pattern.lower() in content.lower()
+                found = pattern_lower in content.lower()
+                logging.debug(
+                    f"CalcJob {node.pk}: Checked output '{filename}', found={found}, content length={len(content)}"
+                )
+                return found
 
             # Check if it's an input file
             input_files = get_input_files(node)
+            logging.debug(f"CalcJob {node.pk}: Input files: {input_files}")
+
             if filename in input_files:
                 content = get_input_file_content(node, filename)
-                return pattern.lower() in content.lower()
+                found = pattern_lower in content.lower()
+                logging.debug(
+                    f"CalcJob {node.pk}: Checked input '{filename}', found={found}, content length={len(content)}"
+                )
+                return found
 
+            # File not found
+            logging.warning(
+                f"CalcJob {node.pk}: File '{filename}' not found! Available: {retrieved_files + input_files}"
+            )
             return False
-        except Exception:
+        except Exception as e:
+            logging.error(f"CalcJob {node.pk}: Exception: {str(e)}")
             return False

@@ -21,7 +21,7 @@ def get_groups() -> list[dict]:
 
     rows = qb.all()
     return [
-        {"label": label, "type_string": type_string, "n_nodes": len(group.nodes)}
+        {"label": label, "type_string": type_string, "n_nodes": group.count()}
         for label, type_string, group in rows
     ]
 
@@ -81,6 +81,5 @@ def get_descendants(node: Node) -> list[Node]:
         with_incoming="parent",
         project=["*"],
     )
-    descendants = [row[0] for row in qb.all()]
 
-    return descendants
+    return qb.all(flat=True)

@@ -1,0 +1,18 @@
+{
+  "Electronic convergence not achieved": {
+    "filename": "aiida.out",
+    "pattern": "convergence NOT achieved"
+  },
+  "MPICH error - stopped in the scf step.": {
+    "filename": "_scheduler-stderr.txt",
+    "pattern": "MPICH ERROR"
+  },
+  "JOB DONE - still error": {
+    "filename": "aiida.out",
+    "pattern": "JOB DONE."
+  },
+  "JOB": {
+    "filename": "aiida.out",
+    "pattern": "JOB DONE."
+  }
+}
