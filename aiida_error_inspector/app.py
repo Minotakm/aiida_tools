@@ -16,13 +16,17 @@ from textual.containers import Vertical
 from textual.screen import ModalScreen
 from textual.widgets import DataTable, Footer, Header, Input, Label, RichLog, Static
 
-from node_inspector import (
+from aiida_error_inspector.node_inspector import (
     get_file_content,
     get_retrieved_files,
     get_input_files,
     get_input_file_content,
 )
-from queries import get_descendants, get_groups, get_nodes_in_group
+from aiida_error_inspector.queries import (
+    get_descendants,
+    get_groups,
+    get_nodes_in_group,
+)
 
 
 class TagNameScreen(ModalScreen[str]):
@@ -181,14 +185,15 @@ class GroupNodesApp(App):
         # Settings - show last 500 lines by default for files
         self.preview_lines = 500
 
-        # Error tagging - save in current working directory
-        self.tags_file = Path.cwd() / ".aiida_tui_tags.json"
+        # Error tagging - save in package directory
+        package_dir = Path(__file__).parent
+        self.tags_file = package_dir / ".aiida_tui_tags.json"
         self.tags: dict[int, str] = {}  # Map node PK to tag name
-        self.categorized_file = Path.cwd() / ".aiida_tui_categorized.json"
+        self.categorized_file = package_dir / ".aiida_tui_categorized.json"
         self.categorized_workchains: set[int] = (
             set()
         )  # Set of PKs that have been tagged (globally)
-        self.patterns_file = Path.cwd() / ".aiida_tui_patterns.json"
+        self.patterns_file = package_dir / ".aiida_tui_patterns.json"
         self.error_patterns: dict[str, dict[str, str]] = (
             {}
         )  # Map tag_name -> {"filename": ..., "pattern": ...}
@@ -197,7 +202,7 @@ class GroupNodesApp(App):
         self.load_patterns()
 
         # Setup logging for debugging
-        self.log_file = Path.cwd() / ".aiida_tui_debug.log"
+        self.log_file = package_dir / ".aiida_tui_debug.log"
         logging.basicConfig(
             filename=str(self.log_file),
             level=logging.DEBUG,
@@ -251,11 +256,11 @@ class GroupNodesApp(App):
             if tag_name not in tag_to_pks:
                 tag_to_pks[tag_name] = []
             tag_to_pks[tag_name].append(pk)
-        
+
         # Sort PKs within each tag
         for tag_name in tag_to_pks:
             tag_to_pks[tag_name].sort()
-        
+
         with open(self.tags_file, "w") as f:
             json.dump(tag_to_pks, f, indent=2)
 

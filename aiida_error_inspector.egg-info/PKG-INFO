@@ -1,0 +1,131 @@
+Metadata-Version: 2.4
+Name: aiida-error-inspector
+Version: 0.1.0
+Summary: A Terminal UI for browsing AiiDA workchains and tagging failed calculations by error patterns
+Author-email: Your Name <your.email@example.com>
+License: MIT
+Project-URL: Homepage, https://github.com/Minotakm/aiida_tools
+Project-URL: Repository, https://github.com/Minotakm/aiida_tools
+Project-URL: Issues, https://github.com/Minotakm/aiida_tools/issues
+Keywords: aiida,tui,terminal,workchain,error,debugging
+Classifier: Development Status :: 3 - Alpha
+Classifier: Framework :: AiiDA
+Classifier: Intended Audience :: Science/Research
+Classifier: License :: OSI Approved :: MIT License
+Classifier: Programming Language :: Python :: 3
+Classifier: Programming Language :: Python :: 3.9
+Classifier: Programming Language :: Python :: 3.10
+Classifier: Programming Language :: Python :: 3.11
+Classifier: Programming Language :: Python :: 3.12
+Classifier: Topic :: Scientific/Engineering
+Requires-Python: >=3.9
+Description-Content-Type: text/markdown
+License-File: LICENSE
+Requires-Dist: aiida-core>=2.0
+Requires-Dist: textual>=0.40.0
+Provides-Extra: dev
+Requires-Dist: pytest; extra == "dev"
+Requires-Dist: pytest-cov; extra == "dev"
+Requires-Dist: pre-commit; extra == "dev"
+Dynamic: license-file
+
+# AiiDA Groups and Nodes TUI
+
+A Terminal User Interface (TUI) for browsing AiiDA groups, nodes, and inspecting calculation outputs.
+
+## Features
+
+- Browse AiiDA groups
+- View nodes within groups
+- Navigate through process descendants
+- View output files (aiida.out, scheduler outputs) and input files (aiida.in, _aiidasubmit.sh)
+- Adjust preview lines dynamically
+- **Tag and categorize errors** - Find error patterns and automatically tag all matching calculations
+- Sort failed/problematic calculations at the top
+- Persistent tags stored in `~/.aiida_tui_tags.json`
+
+## Requirements
+
+```bash
+pip install aiida-core textual
+```
+
+## Usage
+
+```bash
+# Start TUI and browse all groups
+python src/main.py
+
+# Start TUI with a specific group
+python src/main.py "my-group-label"
+python src/main.py 123  # by PK
+```
+
+## Navigation
+
+### Keybindings
+
+| Key | Action | Description |
+|-----|--------|-------------|
+| `a` | Select | Select group/node and drill down |
+| `b` | Back | Go back to previous view |
+| `r` | Refresh | Reload current view |
+| `m` | More lines | Increase preview lines for output files |
+| `l` | Fewer lines | Decrease preview lines for output files |
+| `t` | Tag Error | Tag current calculation and scan for similar errors |
+| `q` | Quit | Exit the application |
+
+### Workflow
+
+1. **Groups View** - Browse all AiiDA core groups
+2. **Nodes View** - Select a group (`a`) to see all nodes
+3. **Descendants View** - Select a node (`a`) to see called processes
+4. **File List View** - Select a CalcJob (`a`) to see available files
+5. **File View** - Select a file (`a`) to view its content
+
+## Error Tagging Workflow
+
+The tagging feature helps you categorize and track calculations with similar errors:
+
+1. **Find an error** - Navigate to a failed CalcJob and view its output file
+2. **Press `t`** - Opens tag dialog
+3. **Enter tag name** - Give it a descriptive name (e.g., "memory_error", "scf_not_converged")
+4. **Enter search pattern** - Type the error message or pattern to search for (e.g., "OOM", "convergence not achieved")
+5. **Automatic scan** - The TUI scans all CalcJobs in the current scope (group or workchain) and tags matching ones
+6. **View tags** - Tagged calculations show their tag in the "Tag" column
+7. **Tags persist** - Tags are saved to `~/.aiida_tui_tags.json` and persist across sessions
+
+**Example use case:**
+- You have 500 failed calculations
+- You spot "BFGS history already reset" in one output
+- Press `t`, enter tag "bfgs_error" and pattern "BFGS history already reset"
+- All 47 calculations with this error are now tagged
+- You can visually identify and track this error category
+
+## File Structure
+
+```
+src/
+├── main.py              # Entry point
+├── app.py               # Main TUI application
+├── queries.py           # AiiDA database queries
+└── node_inspector.py    # File inspection utilities
+```
+
+## Files Displayed
+
+The TUI shows both input and output files:
+
+**Output files** (from retrieved folder):
+- `aiida.out` - Main calculation output (last N lines shown, default: 500)
+- `_scheduler-stdout.txt` - Scheduler standard output
+- `_scheduler-stderr.txt` - Scheduler error output
+
+**Input files** (from repository, full file shown):
+- `aiida.in` - Input file submitted to the code
+- `_aiidasubmit.sh` - Submission script
+
+Use `m` and `l` keys to adjust the number of preview lines for output files.
+- `_scheduler-stderr.txt` - Scheduler standard error
+
+Use `+`/`-` to adjust how many lines are shown (increments of 20).

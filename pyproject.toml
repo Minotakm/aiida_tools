@@ -1,0 +1,53 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel", "setuptools_scm[toml]>=6.2"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "aiida-error-inspector"
+version = "0.1.0"
+description = "A Terminal UI for browsing AiiDA workchains and tagging failed calculations by error patterns"
+readme = "README.md"
+authors = [
+    {name = "Michael Minotakis", email = "mminotakis@gmail.com"}
+]
+license = {text = "MIT"}
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Framework :: AiiDA",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering",
+]
+keywords = ["aiida", "tui", "terminal", "workchain", "error", "debugging"]
+requires-python = ">=3.9"
+dependencies = [
+    "aiida-core>=2.0",
+    "textual>=0.40.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "pytest-cov",
+    "pre-commit",
+]
+
+[project.scripts]
+aiida-error-inspector = "aiida_error_inspector.main:main"
+
+[project.urls]
+Homepage = "https://github.com/Minotakm/aiida_tools"
+Repository = "https://github.com/Minotakm/aiida_tools"
+Issues = "https://github.com/Minotakm/aiida_tools/issues"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["aiida_error_inspector*"]
+
+[tool.setuptools.package-data]
+aiida_error_inspector = ["py.typed"]

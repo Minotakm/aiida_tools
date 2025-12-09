@@ -1,8 +1,8 @@
 #!/usr/bin/env python
-"""Entry point for the AiiDA Groups and Nodes TUI.
+"""Entry point for the AiiDA Error Inspector TUI.
 
 Usage:
-    python main.py [GROUP_IDENTIFIER]
+    aiida-error-inspector [GROUP_IDENTIFIER]
 
 where GROUP_IDENTIFIER can be:
   - group label (e.g., "my-group")
@@ -16,16 +16,14 @@ import sys
 
 from aiida.manage.configuration import load_profile
 
-from app import GroupNodesApp
+from aiida_error_inspector.app import GroupNodesApp
 
 
 def main() -> None:
-    """Entry point for the TUI application."""
+    """Main entry point for the aiida-error-inspector CLI."""
     load_profile()
 
-    # Get group identifier from command line if provided
     group_identifier = sys.argv[1] if len(sys.argv) > 1 else None
-
     app = GroupNodesApp(group_identifier=group_identifier)
     app.run()
 

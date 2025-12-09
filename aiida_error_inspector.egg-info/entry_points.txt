@@ -1,0 +1,2 @@
+[console_scripts]
+aiida-error-inspector = aiida_error_inspector.main:main

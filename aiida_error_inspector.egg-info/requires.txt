@@ -1,0 +1,7 @@
+aiida-core>=2.0
+textual>=0.40.0
+
+[dev]
+pytest
+pytest-cov
+pre-commit
