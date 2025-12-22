@@ -16,7 +16,7 @@ import sys
 
 from aiida.manage.configuration import load_profile
 
-from aiida_error_inspector.app import GroupNodesApp
+from .app import GroupNodesApp
 
 
 def main() -> None:

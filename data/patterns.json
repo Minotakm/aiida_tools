@@ -1,0 +1,14 @@
+{
+  "SCF convergence issue": {
+    "filename": "aiida.out",
+    "pattern": "convergence NOT achieved"
+  },
+  "Wrong bands read from file": {
+    "filename": "aiida.out",
+    "pattern": "The number of bands for this run"
+  },
+  "MPICH error (might be diagonalisation issue)": {
+    "filename": "_scheduler-stderr.txt",
+    "pattern": "MPICH ERROR"
+  }
+}

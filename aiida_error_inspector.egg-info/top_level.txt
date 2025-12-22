@@ -1,1 +1,1 @@
-aiida_error_inspector
+src

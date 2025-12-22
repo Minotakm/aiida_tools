@@ -16,13 +16,13 @@ from textual.containers import Vertical
 from textual.screen import ModalScreen
 from textual.widgets import DataTable, Footer, Header, Input, Label, RichLog, Static
 
-from aiida_error_inspector.node_inspector import (
+from .node_inspector import (
     get_file_content,
     get_retrieved_files,
     get_input_files,
     get_input_file_content,
 )
-from aiida_error_inspector.queries import (
+from .queries import (
     get_descendants,
     get_groups,
     get_nodes_in_group,
@@ -185,15 +185,19 @@ class GroupNodesApp(App):
         # Settings - show last 500 lines by default for files
         self.preview_lines = 500
 
-        # Error tagging - save in package directory
+        # Error tagging - save in data directory at repo root
         package_dir = Path(__file__).parent
-        self.tags_file = package_dir / ".aiida_tui_tags.json"
+        repo_root = package_dir.parent
+        data_dir = repo_root / "data"
+        data_dir.mkdir(exist_ok=True)
+
+        self.tags_file = data_dir / "tags.json"
         self.tags: dict[int, str] = {}  # Map node PK to tag name
-        self.categorized_file = package_dir / ".aiida_tui_categorized.json"
+        self.categorized_file = data_dir / "categorized.json"
         self.categorized_workchains: set[int] = (
             set()
         )  # Set of PKs that have been tagged (globally)
-        self.patterns_file = package_dir / ".aiida_tui_patterns.json"
+        self.patterns_file = data_dir / "patterns.json"
         self.error_patterns: dict[str, dict[str, str]] = (
             {}
         )  # Map tag_name -> {"filename": ..., "pattern": ...}
