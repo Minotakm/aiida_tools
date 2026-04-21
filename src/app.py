@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import datetime
 import json
 import logging
 from pathlib import Path
@@ -121,6 +122,87 @@ class PatternScreen(ModalScreen[str]):
         self.dismiss(event.value)
 
 
+class TagInspectorScreen(ModalScreen):
+    """Read-only modal listing every tag, its count, and the pattern/file used."""
+
+    CSS = """
+    TagInspectorScreen {
+        align: center middle;
+    }
+
+    #dialog {
+        width: 100;
+        height: 30;
+        border: thick $background 80%;
+        background: $surface;
+    }
+
+    #inspector_title {
+        height: 1;
+        content-align: center middle;
+    }
+
+    #inspector_hint {
+        height: 1;
+        content-align: center middle;
+        color: $text-muted;
+    }
+
+    DataTable {
+        height: 1fr;
+    }
+    """
+
+    def __init__(
+        self,
+        tags: dict[int, str],
+        patterns: dict[str, dict[str, str]],
+        **kwargs,
+    ) -> None:
+        super().__init__(**kwargs)
+        self._tags = tags
+        self._patterns = patterns
+
+    def compose(self) -> ComposeResult:
+        yield Vertical(
+            Label("[b]Tag Inspector[/b]", id="inspector_title"),
+            Label("Press Escape to close", id="inspector_hint"),
+            DataTable(zebra_stripes=True),
+            id="dialog",
+        )
+
+    def on_mount(self) -> None:
+        table = self.query_one(DataTable)
+        table.cursor_type = "row"
+        table.add_columns("Tag", "Count", "File", "Pattern")
+
+        counts: dict[str, int] = {}
+        for tag_name in self._tags.values():
+            counts[tag_name] = counts.get(tag_name, 0) + 1
+
+        # Include tags with 0 matches if a pattern exists but no PKs are tagged yet.
+        all_tag_names = set(counts) | set(self._patterns)
+        rows = []
+        for tag_name in sorted(all_tag_names):
+            info = self._patterns.get(tag_name, {})
+            rows.append(
+                (
+                    tag_name,
+                    str(counts.get(tag_name, 0)),
+                    info.get("filename", "-"),
+                    info.get("pattern", "-"),
+                )
+            )
+        if rows:
+            table.add_rows(rows)
+        table.focus()
+
+    def on_key(self, event) -> None:
+        if event.key == "escape":
+            event.prevent_default()
+            self.dismiss(None)
+
+
 class GroupNodesApp(App):
     """Textual app that displays nodes in a given AiiDA group."""
 
@@ -160,7 +242,11 @@ class GroupNodesApp(App):
         Binding("m", "increase_preview", "More lines", show=True),
         Binding("l", "decrease_preview", "Fewer lines", show=True),
         Binding("t", "tag_error", "Tag Error", show=True),
+        Binding("T", "filter_by_tag", "Filter tagged", show=True),
         Binding("u", "update_tags", "Update Tags", show=True),
+        Binding("x", "untag", "Untag", show=True),
+        Binding("i", "tag_inspector", "Tag Inspector", show=True),
+        Binding("e", "export_tagged", "Export", show=True),
         Binding("slash", "search", "Search", show=True),
     ]
 
@@ -203,6 +289,7 @@ class GroupNodesApp(App):
         self._search_active = False
         self._search_debounce_timer = None
         self._base_title = ""  # Title without search match-count suffix
+        self._tag_filter = "all"  # "all", "tagged", "untagged" — cycled via T
 
         # Scanning state
         self._scanning = False
@@ -353,6 +440,51 @@ class GroupNodesApp(App):
         if self.title_widget is not None:
             self.title_widget.update(text)
 
+    def _format_node_breadcrumb(self, node: Node) -> str:
+        """Render a node as a compact breadcrumb segment."""
+        if isinstance(node, orm.WorkChainNode):
+            return f"WC {node.pk}"
+        if isinstance(node, orm.CalcJobNode):
+            return f"CalcJob {node.pk}"
+        return f"Node {node.pk}"
+
+    def _render_breadcrumb(self) -> str:
+        """Build a 'Groups › group › WC 1234 › CalcJob 5678 › file' breadcrumb."""
+        parts = ["[b]Groups[/b]"]
+        if self.mode == "groups":
+            return " › ".join(parts)
+
+        if self.group is not None:
+            parts.append(f"[b]{self.group.label}[/b]")
+
+        if self.mode == "nodes":
+            return " › ".join(parts)
+
+        # descendants / file_list / file_view: append the node path.
+        node_path: list[Node] = []
+        for _, stack_node in self.navigation_stack:
+            if stack_node is not None:
+                node_path.append(stack_node)
+        if self.current_node is not None:
+            if not node_path or node_path[-1].pk != self.current_node.pk:
+                node_path.append(self.current_node)
+
+        for n in node_path:
+            parts.append(self._format_node_breadcrumb(n))
+
+        if self.mode == "file_view" and self.current_file:
+            parts.append(f"[b]{self.current_file}[/b]")
+
+        return " › ".join(parts)
+
+    def _set_breadcrumb_title(self, suffix: str = "") -> None:
+        """Set title to breadcrumb + optional suffix."""
+        breadcrumb = self._render_breadcrumb()
+        if suffix:
+            self._set_title(f"{breadcrumb} | {suffix}")
+        else:
+            self._set_title(breadcrumb)
+
     @staticmethod
     def _format_size(nbytes: int | None) -> str:
         """Human-readable file size."""
@@ -409,7 +541,7 @@ class GroupNodesApp(App):
         ]
         self._set_table_rows(rows)
 
-        self._set_title("[b]Select a group to analyse[/b]")
+        self._set_breadcrumb_title("Select a group to analyse")
 
         if self.groups:
             self.table.focus()
@@ -492,10 +624,9 @@ class GroupNodesApp(App):
 
         self._set_table_rows(rows)
 
-        self._set_title(
-            f"[b]Group:[/b] {self.group.label or self.group_identifier} | "
-            f"[b]Nodes:[/b] {len(results)}"
-        )
+        self._set_breadcrumb_title(f"[b]Nodes:[/b] {len(results)}")
+        if self._tag_filter != "all":
+            self._apply_search_filter("")
 
         if results:
             self.table.focus()
@@ -570,11 +701,9 @@ class GroupNodesApp(App):
 
         self._set_table_rows(rows)
 
-        parent_label = getattr(node, "process_label", f"Node {node.pk}")
-        self._set_title(
-            f"[b]Called by:[/b] {parent_label} (PK: {node.pk}) | "
-            f"[b]Processes:[/b] {len(self.nodes_list)}"
-        )
+        self._set_breadcrumb_title(f"[b]Processes:[/b] {len(self.nodes_list)}")
+        if self._tag_filter != "all":
+            self._apply_search_filter("")
 
         if self.nodes_list:
             self.table.focus()
@@ -626,10 +755,7 @@ class GroupNodesApp(App):
 
         self._set_table_rows(rows)
 
-        self._set_title(
-            f"[b]Select file to view[/b] (PK: {node.pk}) | "
-            f"Press 'a' to view file content"
-        )
+        self._set_breadcrumb_title("Select file to view (press 'a')")
 
         if self.available_files:
             self.table.focus()
@@ -676,14 +802,11 @@ class GroupNodesApp(App):
         self.detail_view.text = header + content
 
         if file_type == "output":
-            self._set_title(
-                f"[b]{filename}[/b] (PK: {node.pk}) | "
-                f"Last {self.preview_lines} lines | Press m/l to adjust | 'b' to go back"
+            self._set_breadcrumb_title(
+                f"Last {self.preview_lines} lines | m/l to adjust | 'b' to go back"
             )
         else:
-            self._set_title(
-                f"[b]{filename}[/b] (PK: {node.pk}) | Input file | 'b' to go back"
-            )
+            self._set_breadcrumb_title("Input file | 'b' to go back")
 
         self.detail_view.focus()
 
@@ -1070,6 +1193,95 @@ class GroupNodesApp(App):
             f"Scan complete for '{tag_name}': scanned {len(uncategorized_workchains)}, tagged {tagged_count}"
         )
 
+    def action_filter_by_tag(self) -> None:
+        """Cycle the tag-only filter: all → tagged → untagged → all."""
+        if self.mode not in ("nodes", "descendants"):
+            self.notify("Tag filter only available in node lists")
+            return
+
+        cycle = {"all": "tagged", "tagged": "untagged", "untagged": "all"}
+        self._tag_filter = cycle[self._tag_filter]
+        label = {
+            "all": "Showing all rows",
+            "tagged": "Showing tagged only",
+            "untagged": "Showing untagged only",
+        }[self._tag_filter]
+        self.notify(label)
+
+        current_query = ""
+        try:
+            search_input = self.query_one("#search_input", Input)
+            current_query = search_input.value
+        except Exception:
+            pass
+        self._apply_search_filter(current_query)
+
+    def action_untag(self) -> None:
+        """Remove the tag from the row under the cursor."""
+        if self.mode not in ("nodes", "descendants"):
+            return
+        if self.table is None or self.table.cursor_row is None:
+            return
+        try:
+            row = self.table.get_row_at(self.table.cursor_row)
+            pk = int(row[0])
+        except (ValueError, IndexError):
+            return
+        if pk not in self.tags:
+            self.notify("Row is not tagged", severity="warning")
+            return
+
+        tag_name = self.tags.pop(pk)
+        self.categorized_workchains.discard(pk)
+        self.save_tags()
+        self.save_categorized()
+        self.notify(f"Removed tag '{tag_name}' from PK {pk}")
+
+        if self.mode == "nodes":
+            self.load_nodes()
+        elif self.mode == "descendants" and self.current_node:
+            self.show_descendants(self.current_node)
+
+    def action_tag_inspector(self) -> None:
+        """Open a read-only modal listing all tags, counts, and patterns."""
+        self.push_screen(TagInspectorScreen(dict(self.tags), dict(self.error_patterns)))
+
+    def action_export_tagged(self) -> None:
+        """Write currently-displayed tagged PKs to data/export_<timestamp>.txt."""
+        if self.mode not in ("nodes", "descendants"):
+            self.notify("Export only works from node lists", severity="warning")
+            return
+
+        tagged_pks = [pk for pk in self.nodes_list if pk in self.tags]
+        if not tagged_pks:
+            self.notify("No tagged workchains in current view", severity="warning")
+            return
+
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        export_path = self.tags_file.parent / f"export_{timestamp}.txt"
+
+        by_tag: dict[str, list[int]] = {}
+        for pk in tagged_pks:
+            by_tag.setdefault(self.tags[pk], []).append(pk)
+
+        lines = [
+            f"# Exported {datetime.datetime.now().isoformat(timespec='seconds')}",
+        ]
+        if self.group is not None:
+            lines.append(f"# Group: {self.group.label}")
+        lines.append(f"# Mode: {self.mode}")
+        lines.append(f"# Tag filter: {self._tag_filter}")
+        lines.append(f"# Total tagged PKs: {len(tagged_pks)}")
+        lines.append("")
+        for tag_name in sorted(by_tag):
+            pks = sorted(by_tag[tag_name])
+            lines.append(f"[{tag_name}] ({len(pks)})")
+            lines.extend(str(pk) for pk in pks)
+            lines.append("")
+
+        export_path.write_text("\n".join(lines))
+        self.notify(f"Exported {len(tagged_pks)} tagged PKs → {export_path}")
+
     def action_search(self) -> None:
         """Toggle search/filter bar for table views."""
         if self.mode not in ("groups", "nodes", "descendants", "file_list"):
@@ -1120,14 +1332,25 @@ class GroupNodesApp(App):
             self._apply_search_filter("")
             self.table.focus()
 
+    def _row_matches_tag_filter(self, row: tuple) -> bool:
+        """Return True if row passes the current tag filter (all/tagged/untagged)."""
+        if self._tag_filter == "all":
+            return True
+        try:
+            pk = int(row[0])
+        except (ValueError, TypeError, IndexError):
+            return True
+        is_tagged = pk in self.tags
+        return is_tagged if self._tag_filter == "tagged" else not is_tagged
+
     def _apply_search_filter(self, query: str) -> None:
-        """Filter table rows by search query."""
+        """Filter table rows by search query and active tag filter."""
         assert self.table is not None
 
         query_lower = query.lower().strip()
 
         if not query_lower:
-            matching_rows = self._all_table_rows
+            matching_rows = list(self._all_table_rows)
         else:
             matching_rows = [
                 row
@@ -1135,6 +1358,11 @@ class GroupNodesApp(App):
                     self._all_table_rows, self._all_table_rows_lower
                 )
                 if query_lower in lower
+            ]
+
+        if self._tag_filter != "all" and self.mode in ("nodes", "descendants"):
+            matching_rows = [
+                row for row in matching_rows if self._row_matches_tag_filter(row)
             ]
 
         # First column is always PK in nodes/descendants modes
@@ -1154,11 +1382,19 @@ class GroupNodesApp(App):
             if matching_rows:
                 self.table.add_rows(matching_rows)
 
-        # Reflect match count in the title while search is active.
+        # Reflect filter + search state in the title (without mutating the base title).
         if self.title_widget is not None:
+            suffix_parts = []
+            if self._tag_filter != "all" and self.mode in ("nodes", "descendants"):
+                label = "Tagged only" if self._tag_filter == "tagged" else "Untagged only"
+                suffix_parts.append(f"[b]{label}[/b]")
             if self._search_active:
+                suffix_parts.append(
+                    f"[b]Matches:[/b] {len(matching_rows)} / {len(self._all_table_rows)}"
+                )
+            if suffix_parts:
                 self.title_widget.update(
-                    f"{self._base_title} | [b]Matches:[/b] {len(matching_rows)} / {len(self._all_table_rows)}"
+                    f"{self._base_title} | " + " | ".join(suffix_parts)
                 )
             else:
                 self.title_widget.update(self._base_title)
