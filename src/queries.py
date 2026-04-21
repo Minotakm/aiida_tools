@@ -62,13 +62,13 @@ def get_nodes_in_group(group_label: str) -> list[tuple]:
 
 
 def get_descendants(node: Node) -> list[Node]:
-    """Load all called descendants of a given node.
+    """Load called WorkChain and CalcJob descendants of a given node.
 
     Args:
         node: Parent node
 
     Returns:
-        List of descendant nodes
+        List of descendant WorkChainNode and CalcJobNode instances
     """
     qb = orm.QueryBuilder()
     qb.append(
@@ -79,6 +79,14 @@ def get_descendants(node: Node) -> list[Node]:
     qb.append(
         orm.Node,
         with_incoming="parent",
+        filters={
+            "node_type": {
+                "or": [
+                    {"like": "process.workflow.workchain.%"},
+                    {"like": "process.calculation.calcjob.%"},
+                ]
+            }
+        },
         project=["*"],
     )
 

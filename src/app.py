@@ -14,7 +14,8 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical
 from textual.screen import ModalScreen
-from textual.widgets import DataTable, Footer, Header, Input, Label, RichLog, Static
+from textual.widgets import DataTable, Footer, Header, Input, Label, Static, TextArea
+from textual.work import work
 
 from .node_inspector import (
     get_file_content,
@@ -134,10 +135,17 @@ class GroupNodesApp(App):
             height: 1fr;
         }
 
-        RichLog {
+        TextArea {
             height: 1fr;
             border: solid green;
             background: $surface;
+        }
+
+        #search_input {
+            display: none;
+            dock: bottom;
+            height: 3;
+            margin: 0 1;
         }
         """
 
@@ -150,6 +158,7 @@ class GroupNodesApp(App):
         Binding("l", "decrease_preview", "Fewer lines", show=True),
         Binding("t", "tag_error", "Tag Error", show=True),
         Binding("u", "update_tags", "Update Tags", show=True),
+        Binding("slash", "search", "Search", show=True),
     ]
 
     def __init__(self, group_identifier: str | None = None, **kwargs) -> None:
@@ -177,13 +186,20 @@ class GroupNodesApp(App):
         )  # Map parent PK to selected child PK
         self.selected_files: dict[int, str] = {}  # Map CalcJob PK to selected filename
         self.nodes_list = []
-        self.detail_view: Optional[RichLog] = None
+        self.detail_view: Optional[TextArea] = None
         self.available_files = []  # List of (filename, type) tuples
         self.current_file: Optional[str] = None  # Currently selected file
         self.current_file_type: Optional[str] = None  # 'input' or 'output'
 
         # Settings - show last 500 lines by default for files
         self.preview_lines = 500
+
+        # Search/filter state
+        self._all_table_rows: list[tuple] = []  # Unfiltered rows for current table view
+        self._search_active = False
+
+        # Scanning state
+        self._scanning = False
 
         # Error tagging - save in data directory at repo root
         package_dir = Path(__file__).parent
@@ -221,9 +237,10 @@ class GroupNodesApp(App):
         with Vertical():
             self.table = DataTable(zebra_stripes=True)
             yield self.table
-            self.detail_view = RichLog(highlight=True, markup=True)
+            self.detail_view = TextArea(read_only=True)
             self.detail_view.display = False
             yield self.detail_view
+        yield Input(placeholder="Search... (Escape to close)", id="search_input")
         yield Footer()
 
     def on_mount(self) -> None:
@@ -304,9 +321,21 @@ class GroupNodesApp(App):
         with open(self.patterns_file, "w") as f:
             json.dump(self.error_patterns, f, indent=2)
 
+    def _dismiss_search(self) -> None:
+        """Close search bar if open."""
+        if self._search_active:
+            self._search_active = False
+            try:
+                search_input = self.query_one("#search_input", Input)
+                search_input.display = False
+                search_input.value = ""
+            except Exception:
+                pass
+
     def show_group_list(self) -> None:
         """Populate the table with available groups."""
         assert self.table is not None
+        self._dismiss_search()
 
         self.mode = "groups"
         self.table.clear(columns=True)
@@ -314,9 +343,12 @@ class GroupNodesApp(App):
         self.table.add_columns("Label", "Type", "#Nodes")
 
         self.groups = get_groups()
+        self._all_table_rows = []
 
         for g in self.groups:
-            self.table.add_row(g["label"], g["type_string"], str(g["n_nodes"]))
+            row = (g["label"], g["type_string"], str(g["n_nodes"]))
+            self._all_table_rows.append(row)
+            self.table.add_row(*row)
 
         if self.title_widget is not None:
             self.title_widget.update("[b]Select a group to analyse[/b]")
@@ -338,6 +370,7 @@ class GroupNodesApp(App):
     def setup_table(self) -> None:
         """Configure the DataTable columns for nodes."""
         assert self.table is not None
+        self._dismiss_search()
         self.table.clear(columns=True)
         self.table.cursor_type = "row"
         self.table.add_columns(
@@ -375,6 +408,7 @@ class GroupNodesApp(App):
         results = sorted(results, key=sort_key)
         self.nodes_list = [pk for pk, *_ in results]
 
+        self._all_table_rows = []
         for (
             pk,
             uuid,
@@ -396,7 +430,9 @@ class GroupNodesApp(App):
                 row_exit = exit_status if exit_status is not None else "-"
 
             tag = self.tags.get(pk, "-")
-            self.table.add_row(str(pk), short_uuid, row_type, row_state, row_exit, tag)
+            row = (str(pk), short_uuid, row_type, row_state, row_exit, tag)
+            self._all_table_rows.append(row)
+            self.table.add_row(*row)
 
         if self.title_widget is not None:
             self.title_widget.update(
@@ -414,19 +450,14 @@ class GroupNodesApp(App):
     def show_descendants(self, node: Node) -> None:
         """Display called WorkChains and CalcJobs only."""
         assert self.table is not None
+        self._dismiss_search()
 
         self.mode = "descendants"
         self.table.clear(columns=True)
         self.table.cursor_type = "row"
         self.table.add_columns("PK", "Process", "State", "Exit code", "Tag")
 
-        descendants = get_descendants(node)
-
-        # Filter to show only WorkChains and CalcJobs
-        process_nodes = []
-        for desc_node in descendants:
-            if isinstance(desc_node, (orm.WorkChainNode, orm.CalcJobNode)):
-                process_nodes.append(desc_node)
+        process_nodes = get_descendants(node)
 
         # Sort: failed nodes first
         def sort_key(desc_node):
@@ -451,6 +482,7 @@ class GroupNodesApp(App):
 
         process_nodes = sorted(process_nodes, key=sort_key)
         self.nodes_list = []
+        self._all_table_rows = []
 
         for desc_node in process_nodes:
             self.nodes_list.append(desc_node.pk)
@@ -476,7 +508,9 @@ class GroupNodesApp(App):
             )
 
             tag = self.tags.get(desc_node.pk, "-")
-            self.table.add_row(str(desc_node.pk), process_label, state, exit_code, tag)
+            row = (str(desc_node.pk), process_label, state, exit_code, tag)
+            self._all_table_rows.append(row)
+            self.table.add_row(*row)
 
         if self.title_widget is not None:
             parent_label = getattr(node, "process_label", f"Node {node.pk}")
@@ -497,6 +531,7 @@ class GroupNodesApp(App):
     def show_file_list(self, node: Node) -> None:
         """Show list of available files to select from."""
         assert self.table is not None
+        self._dismiss_search()
 
         if not isinstance(node, orm.CalcJobNode):
             self.notify("Not a CalcJob - no files available")
@@ -527,8 +562,11 @@ class GroupNodesApp(App):
             self.notify("No files found")
             return
 
+        self._all_table_rows = []
         for filename, file_type in self.available_files:
-            self.table.add_row(filename, file_type)
+            row = (filename, file_type)
+            self._all_table_rows.append(row)
+            self.table.add_row(*row)
 
         if self.title_widget is not None:
             self.title_widget.update(
@@ -560,20 +598,16 @@ class GroupNodesApp(App):
         self.mode = "file_view"
         self.table.display = False
         self.detail_view.display = True
-        self.detail_view.clear()
         self.current_file = filename
         self.current_file_type = file_type
 
-        self.detail_view.write("=" * 80)
+        # Build header
+        header = "=" * 80 + "\n"
         if file_type == "output":
-            self.detail_view.write(
-                f"[bold cyan]FILE: {filename} (last {self.preview_lines} lines)[/bold cyan]"
-            )
+            header += f"FILE: {filename} (last {self.preview_lines} lines)\n"
         else:
-            self.detail_view.write(
-                f"[bold cyan]FILE: {filename} (input file)[/bold cyan]"
-            )
-        self.detail_view.write("=" * 80)
+            header += f"FILE: {filename} (input file)\n"
+        header += "=" * 80 + "\n"
 
         if file_type == "output":
             content = get_file_content(
@@ -582,13 +616,13 @@ class GroupNodesApp(App):
         else:
             content = get_input_file_content(node, filename)
 
-        self.detail_view.write(content)
+        self.detail_view.text = header + content
 
         if self.title_widget is not None:
             if file_type == "output":
                 self.title_widget.update(
                     f"[b]{filename}[/b] (PK: {node.pk}) | "
-                    f"Last {self.preview_lines} lines | Press +/- to adjust | 'b' to go back"
+                    f"Last {self.preview_lines} lines | Press m/l to adjust | 'b' to go back"
                 )
             else:
                 self.title_widget.update(
@@ -817,62 +851,100 @@ class GroupNodesApp(App):
     def action_update_tags(self) -> None:
         """Re-scan and auto-tag workchains using previously saved error patterns."""
         if not self.group:
-            if self.title_widget:
-                self.title_widget.update(
-                    "[b red]No group selected. Navigate to a group first.[/b red]"
-                )
+            self.notify("No group selected. Navigate to a group first.", severity="error")
             return
 
         if not self.error_patterns:
-            if self.title_widget:
-                self.title_widget.update(
-                    "[b yellow]No error patterns saved yet. Use 't' to create tags first.[/b yellow]"
-                )
+            self.notify("No error patterns saved yet. Use 't' to create tags first.", severity="warning")
             return
 
-        # Show progress and start scanning
-        if self.title_widget:
-            self.title_widget.update(
-                f"[b yellow]Re-scanning with {len(self.error_patterns)} saved patterns...[/b yellow]"
-            )
+        if self._scanning:
+            self.notify("A scan is already in progress.", severity="warning")
+            return
 
-        total_newly_tagged = 0
-        summary_parts = []
+        self._run_update_tags()
 
-        # Scan with each saved pattern
-        for tag_name, pattern_info in self.error_patterns.items():
-            filename = pattern_info["filename"]
-            pattern = pattern_info["pattern"]
+    @work(thread=True)
+    def _run_update_tags(self) -> None:
+        """Background worker to re-scan with all saved patterns."""
+        self._scanning = True
+        try:
+            total_newly_tagged = 0
+            summary_parts = []
 
-            logging.info(
-                f"Re-scanning for tag '{tag_name}' with pattern '{pattern}' in file '{filename}'"
-            )
+            for tag_name, pattern_info in self.error_patterns.items():
+                filename = pattern_info["filename"]
+                pattern = pattern_info["pattern"]
+                logging.info(
+                    f"Re-scanning for tag '{tag_name}' with pattern '{pattern}' in file '{filename}'"
+                )
+                initial_count = len(self.tags)
+                self._scan_workchains(tag_name, pattern, filename)
+                newly_tagged = len(self.tags) - initial_count
+                total_newly_tagged += newly_tagged
+                if newly_tagged > 0:
+                    summary_parts.append(f"{newly_tagged} '{tag_name}'")
 
-            # Reuse the existing scan method
-            initial_count = len(self.tags)
-            self.scan_and_tag_father_workchains(tag_name, pattern, filename)
-            newly_tagged = len(self.tags) - initial_count
-            total_newly_tagged += newly_tagged
-
-            if newly_tagged > 0:
-                summary_parts.append(f"{newly_tagged} '{tag_name}'")
-
-        # Show final summary
-        if self.title_widget:
             if total_newly_tagged > 0:
                 summary = ", ".join(summary_parts)
-                self.title_widget.update(
-                    f"[b green]Re-scan complete! Newly tagged: {summary}[/b green]"
-                )
+                msg = f"[b green]Re-scan complete! Newly tagged: {summary}[/b green]"
             else:
-                self.title_widget.update(
-                    f"[b green]Re-scan complete! No new workchains matched the patterns.[/b green]"
-                )
+                msg = "[b green]Re-scan complete! No new workchains matched.[/b green]"
+            self.call_from_thread(self._finish_scan, msg)
+        finally:
+            self._scanning = False
 
     def scan_and_tag_father_workchains(
         self, tag_name: str, pattern: str, filename: str
     ) -> None:
-        """Scan all father workchains in group and tag those with the error pattern."""
+        """Launch background scan for error pattern tagging."""
+        if self._scanning:
+            self.notify("A scan is already in progress.", severity="warning")
+            return
+        self._run_scan_worker(tag_name, pattern, filename)
+
+    @work(thread=True)
+    def _run_scan_worker(
+        self, tag_name: str, pattern: str, filename: str
+    ) -> None:
+        """Background worker for a single tag scan."""
+        self._scanning = True
+        try:
+            self._scan_workchains(tag_name, pattern, filename)
+
+            # Save pattern for this tag for future re-scans
+            self.error_patterns[tag_name] = {"filename": filename, "pattern": pattern}
+            self.save_patterns()
+            self.save_tags()
+            self.save_categorized()
+
+            self.call_from_thread(self._finish_scan_and_navigate, tag_name)
+        finally:
+            self._scanning = False
+
+    def _finish_scan(self, message: str) -> None:
+        """Called on main thread after scan completes to update UI."""
+        if self.mode == "nodes":
+            self.load_nodes()
+        if self.title_widget:
+            self.title_widget.update(message)
+
+    def _finish_scan_and_navigate(self, tag_name: str) -> None:
+        """Called on main thread after single-tag scan to navigate back and refresh."""
+        # Navigate back to nodes view
+        while self.mode != "nodes":
+            self.action_go_back()
+        self.load_nodes()
+        if self.title_widget:
+            tagged_with_tag = sum(1 for t in self.tags.values() if t == tag_name)
+            self.title_widget.update(
+                f"[b green]Scan complete! {tagged_with_tag} workchains tagged with '{tag_name}'[/b green]"
+            )
+
+    def _scan_workchains(
+        self, tag_name: str, pattern: str, filename: str
+    ) -> None:
+        """Core scanning logic (runs in background thread)."""
         tagged_count = 0
         total_failed_calcs = 0
 
@@ -907,8 +979,9 @@ class GroupNodesApp(App):
             try:
                 # Update progress every 10 workchains
                 if idx % 10 == 0 and self.title_widget:
-                    self.title_widget.update(
-                        f"[b yellow]Scanning... {idx}/{len(uncategorized_workchains)} workchains (skipped {skipped_count})[/b yellow]"
+                    self.call_from_thread(
+                        self.title_widget.update,
+                        f"[b yellow]Scanning '{tag_name}'... {idx}/{len(uncategorized_workchains)} (skipped {skipped_count})[/b yellow]",
                     )
 
                 # Check if this workchain has the error pattern
@@ -920,55 +993,87 @@ class GroupNodesApp(App):
                 if has_error:
                     self.tags[workchain.pk] = tag_name
                     tagged_count += 1
-
-                    # Mark as categorized globally (will be skipped in all future scans)
                     self.categorized_workchains.add(workchain.pk)
                     logging.info(
                         f"Tagged workchain {workchain.pk} with '{tag_name}' and marked as categorized"
                     )
-
-                    # Debug: show which workchain was tagged
-                    if self.title_widget:
-                        self.title_widget.update(
-                            f"[b green]Tagged workchain {workchain.pk}[/b green]"
-                        )
                 else:
                     logging.debug(
                         f"Workchain {workchain.pk} - pattern not found, will check in next scan"
                     )
 
             except Exception as e:
-                # Don't mark as categorized if there was an error - allow retry in next scan
                 logging.error(
                     f"Error on workchain {workchain.pk}: {str(e)} - will retry in next scan"
                 )
-                # Debug: show if there's an exception
-                if self.title_widget:
-                    self.title_widget.update(
-                        f"[b red]Error on workchain {workchain.pk}: {str(e)}[/b red]"
-                    )
                 continue
 
-        # Save pattern for this tag for future re-scans
-        self.error_patterns[tag_name] = {"filename": filename, "pattern": pattern}
-        self.save_patterns()
+        logging.info(
+            f"Scan complete for '{tag_name}': scanned {len(uncategorized_workchains)}, tagged {tagged_count}"
+        )
 
-        # Save tags and categorized workchains to file
-        self.save_tags()
-        self.save_categorized()
+    def action_search(self) -> None:
+        """Toggle search/filter bar for table views."""
+        if self.mode not in ("groups", "nodes", "descendants", "file_list"):
+            return
 
-        # Go back to nodes view to show updated tags
-        while self.mode != "nodes":
-            self.action_go_back()
+        search_input = self.query_one("#search_input", Input)
+        if self._search_active:
+            # Close search, restore full table
+            self._search_active = False
+            search_input.display = False
+            search_input.value = ""
+            self._apply_search_filter("")
+            self.table.focus()
+        else:
+            self._search_active = True
+            search_input.display = True
+            search_input.value = ""
+            search_input.focus()
 
-        # Refresh nodes view
-        self.load_nodes()
+    def on_input_changed(self, event: Input.Changed) -> None:
+        """Filter table rows as user types in search bar."""
+        if event.input.id == "search_input" and self._search_active:
+            self._apply_search_filter(event.value)
 
-        # Show notification
-        if self.title_widget:
-            self.title_widget.update(
-                f"[b green]Scanned {len(uncategorized_workchains)} workchains (skipped {skipped_count}), {total_failed_calcs} calcs checked, tagged {tagged_count} with '{tag_name}'[/b green]"
-            )
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        """Close search bar on Enter and return focus to table."""
+        if event.input.id == "search_input":
+            # Keep filter applied but close the input
+            self._search_active = False
+            event.input.display = False
+            self.table.focus()
+
+    def on_key(self, event) -> None:
+        """Handle Escape to close search bar."""
+        if event.key == "escape" and self._search_active:
+            event.prevent_default()
+            search_input = self.query_one("#search_input", Input)
+            self._search_active = False
+            search_input.display = False
+            search_input.value = ""
+            self._apply_search_filter("")
+            self.table.focus()
+
+    def _apply_search_filter(self, query: str) -> None:
+        """Filter table rows by search query."""
+        assert self.table is not None
+        self.table.clear()
+
+        query_lower = query.lower().strip()
+        self.nodes_list = []
+
+        for row in self._all_table_rows:
+            if not query_lower or any(
+                query_lower in str(cell).lower() for cell in row
+            ):
+                self.table.add_row(*row)
+                # First column is always PK (except in groups/file_list mode)
+                if self.mode in ("nodes", "descendants"):
+                    try:
+                        self.nodes_list.append(int(row[0]))
+                    except (ValueError, IndexError):
+                        pass
 
     def workchain_has_error_fast(
         self, workchain: orm.WorkChainNode, pattern: str, filename: str
