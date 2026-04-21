@@ -197,6 +197,7 @@ class GroupNodesApp(App):
         # Search/filter state
         self._all_table_rows: list[tuple] = []  # Unfiltered rows for current table view
         self._search_active = False
+        self._search_debounce_timer = None
 
         # Scanning state
         self._scanning = False
@@ -862,10 +863,10 @@ class GroupNodesApp(App):
             self.notify("A scan is already in progress.", severity="warning")
             return
 
-        self._run_update_tags()
+        self._run_update_tags(self.group.label)
 
     @work(thread=True)
-    def _run_update_tags(self) -> None:
+    def _run_update_tags(self, group_label: str) -> None:
         """Background worker to re-scan with all saved patterns."""
         self._scanning = True
         try:
@@ -879,7 +880,7 @@ class GroupNodesApp(App):
                     f"Re-scanning for tag '{tag_name}' with pattern '{pattern}' in file '{filename}'"
                 )
                 initial_count = len(self.tags)
-                self._scan_workchains(tag_name, pattern, filename)
+                self._scan_workchains(tag_name, pattern, filename, group_label)
                 newly_tagged = len(self.tags) - initial_count
                 total_newly_tagged += newly_tagged
                 if newly_tagged > 0:
@@ -901,16 +902,18 @@ class GroupNodesApp(App):
         if self._scanning:
             self.notify("A scan is already in progress.", severity="warning")
             return
-        self._run_scan_worker(tag_name, pattern, filename)
+        if not self.group:
+            return
+        self._run_scan_worker(tag_name, pattern, filename, self.group.label)
 
     @work(thread=True)
     def _run_scan_worker(
-        self, tag_name: str, pattern: str, filename: str
+        self, tag_name: str, pattern: str, filename: str, group_label: str
     ) -> None:
         """Background worker for a single tag scan."""
         self._scanning = True
         try:
-            self._scan_workchains(tag_name, pattern, filename)
+            self._scan_workchains(tag_name, pattern, filename, group_label)
 
             # Save pattern for this tag for future re-scans
             self.error_patterns[tag_name] = {"filename": filename, "pattern": pattern}
@@ -942,14 +945,14 @@ class GroupNodesApp(App):
             )
 
     def _scan_workchains(
-        self, tag_name: str, pattern: str, filename: str
+        self, tag_name: str, pattern: str, filename: str, group_label: str
     ) -> None:
         """Core scanning logic (runs in background thread)."""
         tagged_count = 0
         total_failed_calcs = 0
 
         qb = orm.QueryBuilder()
-        qb.append(orm.Group, filters={"label": self.group.label}, tag="group")
+        qb.append(orm.Group, filters={"label": group_label}, tag="group")
         qb.append(
             orm.WorkChainNode,
             with_group="group",
@@ -1034,7 +1037,12 @@ class GroupNodesApp(App):
     def on_input_changed(self, event: Input.Changed) -> None:
         """Filter table rows as user types in search bar."""
         if event.input.id == "search_input" and self._search_active:
-            self._apply_search_filter(event.value)
+            if self._search_debounce_timer is not None:
+                self._search_debounce_timer.stop()
+            value = event.value
+            self._search_debounce_timer = self.set_timer(
+                0.15, lambda: self._apply_search_filter(value)
+            )
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         """Close search bar on Enter and return focus to table."""
