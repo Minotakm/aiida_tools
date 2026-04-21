@@ -15,7 +15,7 @@ from textual.binding import Binding
 from textual.containers import Vertical
 from textual.screen import ModalScreen
 from textual.widgets import DataTable, Footer, Header, Input, Label, Static, TextArea
-from textual.work import work
+from textual import work
 
 from .node_inspector import (
     get_file_content,
