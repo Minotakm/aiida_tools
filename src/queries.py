@@ -12,17 +12,32 @@ def get_groups() -> list[dict]:
     Returns:
         List of dicts with keys: label, type_string, n_nodes
     """
+    # Single query for group metadata; preserves empty groups
     qb = orm.QueryBuilder()
     qb.append(
         orm.Group,
-        project=["label", "type_string", "*"],
+        project=["id", "label", "type_string"],
         filters={"type_string": "core"},
     )
+    groups = qb.all()
 
-    rows = qb.all()
+    # Single query that streams (group_id, node_id) pairs across all core groups.
+    # Replaces the per-group group.count() N+1 with one DB roundtrip.
+    counts: dict[int, int] = {}
+    count_qb = orm.QueryBuilder()
+    count_qb.append(
+        orm.Group,
+        filters={"type_string": "core"},
+        project=["id"],
+        tag="g",
+    )
+    count_qb.append(orm.Node, with_group="g", project=["id"])
+    for group_id, _ in count_qb.iterall():
+        counts[group_id] = counts.get(group_id, 0) + 1
+
     return [
-        {"label": label, "type_string": type_string, "n_nodes": group.count()}
-        for label, type_string, group in rows
+        {"label": label, "type_string": type_string, "n_nodes": counts.get(gid, 0)}
+        for gid, label, type_string in groups
     ]
 
 

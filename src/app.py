@@ -142,7 +142,7 @@ class GroupNodesApp(App):
         }
 
         #search_input {
-            display: none;
+            visibility: hidden;
             dock: bottom;
             height: 3;
             margin: 0 1;
@@ -196,6 +196,7 @@ class GroupNodesApp(App):
 
         # Search/filter state
         self._all_table_rows: list[tuple] = []  # Unfiltered rows for current table view
+        self._all_table_rows_lower: list[str] = []  # Pre-computed lowercase joins for fast filtering
         self._search_active = False
         self._search_debounce_timer = None
 
@@ -322,13 +323,28 @@ class GroupNodesApp(App):
         with open(self.patterns_file, "w") as f:
             json.dump(self.error_patterns, f, indent=2)
 
+    def _set_table_rows(self, rows: list[tuple]) -> None:
+        """Cache rows + lowercase strings, and bulk-load into the table.
+
+        Assumes columns are already configured. Replaces any existing rows.
+        """
+        assert self.table is not None
+        self._all_table_rows = rows
+        self._all_table_rows_lower = [
+            " ".join(str(cell).lower() for cell in row) for row in rows
+        ]
+        with self.batch_update():
+            self.table.clear()
+            if rows:
+                self.table.add_rows(rows)
+
     def _dismiss_search(self) -> None:
         """Close search bar if open."""
         if self._search_active:
             self._search_active = False
             try:
                 search_input = self.query_one("#search_input", Input)
-                search_input.display = False
+                search_input.visible = False
                 search_input.value = ""
             except Exception:
                 pass
@@ -344,12 +360,10 @@ class GroupNodesApp(App):
         self.table.add_columns("Label", "Type", "#Nodes")
 
         self.groups = get_groups()
-        self._all_table_rows = []
-
-        for g in self.groups:
-            row = (g["label"], g["type_string"], str(g["n_nodes"]))
-            self._all_table_rows.append(row)
-            self.table.add_row(*row)
+        rows = [
+            (g["label"], g["type_string"], str(g["n_nodes"])) for g in self.groups
+        ]
+        self._set_table_rows(rows)
 
         if self.title_widget is not None:
             self.title_widget.update("[b]Select a group to analyse[/b]")
@@ -383,7 +397,6 @@ class GroupNodesApp(App):
         assert self.table is not None
         assert self.group is not None
 
-        self.table.clear()
         results = get_nodes_in_group(self.group.label)
 
         # Sort results: failed nodes first, then by PK
@@ -409,7 +422,7 @@ class GroupNodesApp(App):
         results = sorted(results, key=sort_key)
         self.nodes_list = [pk for pk, *_ in results]
 
-        self._all_table_rows = []
+        rows = []
         for (
             pk,
             uuid,
@@ -431,9 +444,9 @@ class GroupNodesApp(App):
                 row_exit = exit_status if exit_status is not None else "-"
 
             tag = self.tags.get(pk, "-")
-            row = (str(pk), short_uuid, row_type, row_state, row_exit, tag)
-            self._all_table_rows.append(row)
-            self.table.add_row(*row)
+            rows.append((str(pk), short_uuid, row_type, row_state, row_exit, tag))
+
+        self._set_table_rows(rows)
 
         if self.title_widget is not None:
             self.title_widget.update(
@@ -483,7 +496,7 @@ class GroupNodesApp(App):
 
         process_nodes = sorted(process_nodes, key=sort_key)
         self.nodes_list = []
-        self._all_table_rows = []
+        rows = []
 
         for desc_node in process_nodes:
             self.nodes_list.append(desc_node.pk)
@@ -509,9 +522,9 @@ class GroupNodesApp(App):
             )
 
             tag = self.tags.get(desc_node.pk, "-")
-            row = (str(desc_node.pk), process_label, state, exit_code, tag)
-            self._all_table_rows.append(row)
-            self.table.add_row(*row)
+            rows.append((str(desc_node.pk), process_label, state, exit_code, tag))
+
+        self._set_table_rows(rows)
 
         if self.title_widget is not None:
             parent_label = getattr(node, "process_label", f"Node {node.pk}")
@@ -563,11 +576,7 @@ class GroupNodesApp(App):
             self.notify("No files found")
             return
 
-        self._all_table_rows = []
-        for filename, file_type in self.available_files:
-            row = (filename, file_type)
-            self._all_table_rows.append(row)
-            self.table.add_row(*row)
+        self._set_table_rows(list(self.available_files))
 
         if self.title_widget is not None:
             self.title_widget.update(
@@ -1024,13 +1033,13 @@ class GroupNodesApp(App):
         if self._search_active:
             # Close search, restore full table
             self._search_active = False
-            search_input.display = False
+            search_input.visible = False
             search_input.value = ""
             self._apply_search_filter("")
             self.table.focus()
         else:
             self._search_active = True
-            search_input.display = True
+            search_input.visible = True
             search_input.value = ""
             search_input.focus()
 
@@ -1049,7 +1058,7 @@ class GroupNodesApp(App):
         if event.input.id == "search_input":
             # Keep filter applied but close the input
             self._search_active = False
-            event.input.display = False
+            event.input.visible = False
             self.table.focus()
 
     def on_key(self, event) -> None:
@@ -1058,7 +1067,7 @@ class GroupNodesApp(App):
             event.prevent_default()
             search_input = self.query_one("#search_input", Input)
             self._search_active = False
-            search_input.display = False
+            search_input.visible = False
             search_input.value = ""
             self._apply_search_filter("")
             self.table.focus()
@@ -1066,22 +1075,36 @@ class GroupNodesApp(App):
     def _apply_search_filter(self, query: str) -> None:
         """Filter table rows by search query."""
         assert self.table is not None
-        self.table.clear()
 
         query_lower = query.lower().strip()
-        self.nodes_list = []
 
-        for row in self._all_table_rows:
-            if not query_lower or any(
-                query_lower in str(cell).lower() for cell in row
-            ):
-                self.table.add_row(*row)
-                # First column is always PK (except in groups/file_list mode)
-                if self.mode in ("nodes", "descendants"):
-                    try:
-                        self.nodes_list.append(int(row[0]))
-                    except (ValueError, IndexError):
-                        pass
+        if not query_lower:
+            matching_rows = self._all_table_rows
+        else:
+            matching_rows = [
+                row
+                for row, lower in zip(
+                    self._all_table_rows, self._all_table_rows_lower
+                )
+                if query_lower in lower
+            ]
+
+        # First column is always PK in nodes/descendants modes
+        if self.mode in ("nodes", "descendants"):
+            new_nodes_list = []
+            for row in matching_rows:
+                try:
+                    new_nodes_list.append(int(row[0]))
+                except (ValueError, IndexError):
+                    pass
+            self.nodes_list = new_nodes_list
+        else:
+            self.nodes_list = []
+
+        with self.batch_update():
+            self.table.clear()
+            if matching_rows:
+                self.table.add_rows(matching_rows)
 
     def workchain_has_error_fast(
         self, workchain: orm.WorkChainNode, pattern: str, filename: str
