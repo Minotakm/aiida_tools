@@ -18,6 +18,34 @@ def get_retrieved_files(node: CalcJobNode) -> list[str]:
     return []
 
 
+def get_retrieved_file_size(node: CalcJobNode, filename: str) -> int | None:
+    """Return size in bytes of a retrieved file, or None if unknown."""
+    try:
+        with node.outputs.retrieved.open(filename, "rb") as f:
+            f.seek(0, 2)
+            return f.tell()
+    except Exception:
+        try:
+            content = node.outputs.retrieved.get_object_content(filename, mode="rb")
+            return len(content)
+        except Exception:
+            return None
+
+
+def get_input_file_size(node: CalcJobNode, filename: str) -> int | None:
+    """Return size in bytes of an input file, or None if unknown."""
+    try:
+        with node.base.repository.open(filename, "rb") as f:
+            f.seek(0, 2)
+            return f.tell()
+    except Exception:
+        try:
+            content = node.base.repository.get_object_content(filename, mode="rb")
+            return len(content)
+        except Exception:
+            return None
+
+
 def get_file_content(
     node: CalcJobNode, filename: str, head_lines: int = 50, tail_lines: int = 50
 ) -> str:

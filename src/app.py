@@ -10,6 +10,7 @@ from typing import Optional
 from aiida import orm
 from aiida.common.exceptions import NotExistent
 from aiida.orm import Node, load_group
+from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical
@@ -20,8 +21,10 @@ from textual import work
 from .node_inspector import (
     get_file_content,
     get_retrieved_files,
+    get_retrieved_file_size,
     get_input_files,
     get_input_file_content,
+    get_input_file_size,
 )
 from .queries import (
     get_descendants,
@@ -199,6 +202,7 @@ class GroupNodesApp(App):
         self._all_table_rows_lower: list[str] = []  # Pre-computed lowercase joins for fast filtering
         self._search_active = False
         self._search_debounce_timer = None
+        self._base_title = ""  # Title without search match-count suffix
 
         # Scanning state
         self._scanning = False
@@ -219,9 +223,11 @@ class GroupNodesApp(App):
         self.error_patterns: dict[str, dict[str, str]] = (
             {}
         )  # Map tag_name -> {"filename": ..., "pattern": ...}
+        self.settings_file = data_dir / "settings.json"
         self.load_tags()
         self.load_categorized()
         self.load_patterns()
+        self.load_settings()
 
         # Setup logging for debugging
         self.log_file = package_dir / ".aiida_tui_debug.log"
@@ -323,6 +329,44 @@ class GroupNodesApp(App):
         with open(self.patterns_file, "w") as f:
             json.dump(self.error_patterns, f, indent=2)
 
+    def load_settings(self) -> None:
+        """Load persisted user settings (e.g. preview_lines)."""
+        if self.settings_file.exists():
+            try:
+                with open(self.settings_file, "r") as f:
+                    data = json.load(f)
+                value = data.get("preview_lines")
+                if isinstance(value, int) and value > 0:
+                    self.preview_lines = value
+            except (json.JSONDecodeError, ValueError, OSError) as e:
+                logging.error(f"Error loading settings file: {e}")
+
+    def save_settings(self) -> None:
+        """Persist user settings."""
+        settings = {"preview_lines": self.preview_lines}
+        with open(self.settings_file, "w") as f:
+            json.dump(settings, f, indent=2)
+
+    def _set_title(self, text: str) -> None:
+        """Set title widget and remember the base (non-search) title."""
+        self._base_title = text
+        if self.title_widget is not None:
+            self.title_widget.update(text)
+
+    @staticmethod
+    def _format_size(nbytes: int | None) -> str:
+        """Human-readable file size."""
+        if nbytes is None:
+            return "?"
+        size = float(nbytes)
+        for unit in ("B", "KB", "MB", "GB"):
+            if size < 1024 or unit == "GB":
+                if unit == "B":
+                    return f"{int(size)} B"
+                return f"{size:.1f} {unit}"
+            size /= 1024
+        return f"{size:.1f} GB"
+
     def _set_table_rows(self, rows: list[tuple]) -> None:
         """Cache rows + lowercase strings, and bulk-load into the table.
 
@@ -365,8 +409,7 @@ class GroupNodesApp(App):
         ]
         self._set_table_rows(rows)
 
-        if self.title_widget is not None:
-            self.title_widget.update("[b]Select a group to analyse[/b]")
+        self._set_title("[b]Select a group to analyse[/b]")
 
         if self.groups:
             self.table.focus()
@@ -444,15 +487,15 @@ class GroupNodesApp(App):
                 row_exit = exit_status if exit_status is not None else "-"
 
             tag = self.tags.get(pk, "-")
-            rows.append((str(pk), short_uuid, row_type, row_state, row_exit, tag))
+            tag_cell = Text(tag, style="bold yellow") if tag != "-" else tag
+            rows.append((str(pk), short_uuid, row_type, row_state, row_exit, tag_cell))
 
         self._set_table_rows(rows)
 
-        if self.title_widget is not None:
-            self.title_widget.update(
-                f"[b]Group:[/b] {self.group.label or self.group_identifier} | "
-                f"[b]Nodes:[/b] {len(results)}"
-            )
+        self._set_title(
+            f"[b]Group:[/b] {self.group.label or self.group_identifier} | "
+            f"[b]Nodes:[/b] {len(results)}"
+        )
 
         if results:
             self.table.focus()
@@ -522,16 +565,16 @@ class GroupNodesApp(App):
             )
 
             tag = self.tags.get(desc_node.pk, "-")
-            rows.append((str(desc_node.pk), process_label, state, exit_code, tag))
+            tag_cell = Text(tag, style="bold yellow") if tag != "-" else tag
+            rows.append((str(desc_node.pk), process_label, state, exit_code, tag_cell))
 
         self._set_table_rows(rows)
 
-        if self.title_widget is not None:
-            parent_label = getattr(node, "process_label", f"Node {node.pk}")
-            self.title_widget.update(
-                f"[b]Called by:[/b] {parent_label} (PK: {node.pk}) | "
-                f"[b]Processes:[/b] {len(self.nodes_list)}"
-            )
+        parent_label = getattr(node, "process_label", f"Node {node.pk}")
+        self._set_title(
+            f"[b]Called by:[/b] {parent_label} (PK: {node.pk}) | "
+            f"[b]Processes:[/b] {len(self.nodes_list)}"
+        )
 
         if self.nodes_list:
             self.table.focus()
@@ -557,32 +600,36 @@ class GroupNodesApp(App):
         self.mode = "file_list"
         self.table.clear(columns=True)
         self.table.cursor_type = "row"
-        self.table.add_columns("Filename", "Type")
+        self.table.add_columns("Filename", "Type", "Size")
 
         # Build list of available files with their types
         self.available_files = []
+        rows: list[tuple] = []
 
         # Output files from retrieved folder
         output_files = ["aiida.out", "_scheduler-stdout.txt", "_scheduler-stderr.txt"]
         for filename in output_files:
             if filename in retrieved_files:
                 self.available_files.append((filename, "output"))
+                size = get_retrieved_file_size(node, filename)
+                rows.append((filename, "output", self._format_size(size)))
 
         # Input files from repository
         for filename in input_files:
             self.available_files.append((filename, "input"))
+            size = get_input_file_size(node, filename)
+            rows.append((filename, "input", self._format_size(size)))
 
         if not self.available_files:
             self.notify("No files found")
             return
 
-        self._set_table_rows(list(self.available_files))
+        self._set_table_rows(rows)
 
-        if self.title_widget is not None:
-            self.title_widget.update(
-                f"[b]Select file to view[/b] (PK: {node.pk}) | "
-                f"Press 'a' to view file content"
-            )
+        self._set_title(
+            f"[b]Select file to view[/b] (PK: {node.pk}) | "
+            f"Press 'a' to view file content"
+        )
 
         if self.available_files:
             self.table.focus()
@@ -628,16 +675,15 @@ class GroupNodesApp(App):
 
         self.detail_view.text = header + content
 
-        if self.title_widget is not None:
-            if file_type == "output":
-                self.title_widget.update(
-                    f"[b]{filename}[/b] (PK: {node.pk}) | "
-                    f"Last {self.preview_lines} lines | Press m/l to adjust | 'b' to go back"
-                )
-            else:
-                self.title_widget.update(
-                    f"[b]{filename}[/b] (PK: {node.pk}) | Input file | 'b' to go back"
-                )
+        if file_type == "output":
+            self._set_title(
+                f"[b]{filename}[/b] (PK: {node.pk}) | "
+                f"Last {self.preview_lines} lines | Press m/l to adjust | 'b' to go back"
+            )
+        else:
+            self._set_title(
+                f"[b]{filename}[/b] (PK: {node.pk}) | Input file | 'b' to go back"
+            )
 
         self.detail_view.focus()
 
@@ -730,6 +776,7 @@ class GroupNodesApp(App):
             return
 
         self.preview_lines += 50
+        self.save_settings()
 
         if self.mode == "file_view" and self.current_node and self.current_file:
             self.show_file_content(
@@ -744,6 +791,7 @@ class GroupNodesApp(App):
             return
 
         self.preview_lines = max(50, self.preview_lines - 50)
+        self.save_settings()
 
         if self.mode == "file_view" and self.current_node and self.current_file:
             self.show_file_content(
@@ -938,8 +986,7 @@ class GroupNodesApp(App):
         """Called on main thread after scan completes to update UI."""
         if self.mode == "nodes":
             self.load_nodes()
-        if self.title_widget:
-            self.title_widget.update(message)
+        self._set_title(message)
 
     def _finish_scan_and_navigate(self, tag_name: str) -> None:
         """Called on main thread after single-tag scan to navigate back and refresh."""
@@ -947,11 +994,10 @@ class GroupNodesApp(App):
         while self.mode != "nodes":
             self.action_go_back()
         self.load_nodes()
-        if self.title_widget:
-            tagged_with_tag = sum(1 for t in self.tags.values() if t == tag_name)
-            self.title_widget.update(
-                f"[b green]Scan complete! {tagged_with_tag} workchains tagged with '{tag_name}'[/b green]"
-            )
+        tagged_with_tag = sum(1 for t in self.tags.values() if t == tag_name)
+        self._set_title(
+            f"[b green]Scan complete! {tagged_with_tag} workchains tagged with '{tag_name}'[/b green]"
+        )
 
     def _scan_workchains(
         self, tag_name: str, pattern: str, filename: str, group_label: str
@@ -992,7 +1038,7 @@ class GroupNodesApp(App):
                 # Update progress every 10 workchains
                 if idx % 10 == 0 and self.title_widget:
                     self.call_from_thread(
-                        self.title_widget.update,
+                        self._set_title,
                         f"[b yellow]Scanning '{tag_name}'... {idx}/{len(uncategorized_workchains)} (skipped {skipped_count})[/b yellow]",
                     )
 
@@ -1027,6 +1073,8 @@ class GroupNodesApp(App):
     def action_search(self) -> None:
         """Toggle search/filter bar for table views."""
         if self.mode not in ("groups", "nodes", "descendants", "file_list"):
+            if self.mode == "file_view":
+                self.notify("Search not available while viewing a file")
             return
 
         search_input = self.query_one("#search_input", Input)
@@ -1105,6 +1153,15 @@ class GroupNodesApp(App):
             self.table.clear()
             if matching_rows:
                 self.table.add_rows(matching_rows)
+
+        # Reflect match count in the title while search is active.
+        if self.title_widget is not None:
+            if self._search_active:
+                self.title_widget.update(
+                    f"{self._base_title} | [b]Matches:[/b] {len(matching_rows)} / {len(self._all_table_rows)}"
+                )
+            else:
+                self.title_widget.update(self._base_title)
 
     def workchain_has_error_fast(
         self, workchain: orm.WorkChainNode, pattern: str, filename: str
