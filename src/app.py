@@ -5,6 +5,10 @@ from __future__ import annotations
 import datetime
 import json
 import logging
+import os
+import shutil
+import subprocess
+import tempfile
 from pathlib import Path
 from typing import Optional
 
@@ -21,6 +25,7 @@ from textual import work
 
 from .node_inspector import (
     get_file_content,
+    get_full_file_content,
     get_retrieved_files,
     get_retrieved_file_size,
     get_input_files,
@@ -203,6 +208,134 @@ class TagInspectorScreen(ModalScreen):
             self.dismiss(None)
 
 
+class FileSearchScreen(ModalScreen[tuple[str, int] | None]):
+    """Prompt for a pattern and context window when searching inside a file."""
+
+    CSS = """
+    FileSearchScreen {
+        align: center middle;
+    }
+
+    #dialog {
+        width: 80;
+        height: 13;
+        border: thick $background 80%;
+        background: $surface;
+    }
+
+    #hint {
+        height: 2;
+        content-align: center middle;
+        color: $text-muted;
+    }
+
+    Input {
+        margin: 1 2;
+    }
+    """
+
+    def __init__(self, initial_pattern: str = "", initial_context: int = 5, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self._initial_pattern = initial_pattern
+        self._initial_context = initial_context
+
+    def compose(self) -> ComposeResult:
+        yield Vertical(
+            Label("Search pattern (case-insensitive):", id="hint"),
+            Input(value=self._initial_pattern, placeholder="e.g. total magnetization", id="pattern_input"),
+            Input(value=str(self._initial_context), placeholder="context lines after match", id="context_input"),
+            id="dialog",
+        )
+
+    def on_mount(self) -> None:
+        self.query_one("#pattern_input", Input).focus()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        pattern = self.query_one("#pattern_input", Input).value.strip()
+        raw_ctx = self.query_one("#context_input", Input).value.strip()
+        try:
+            context = max(0, int(raw_ctx)) if raw_ctx else 0
+        except ValueError:
+            context = 0
+        if not pattern:
+            self.dismiss(None)
+            return
+        self.dismiss((pattern, context))
+
+    def on_key(self, event) -> None:
+        if event.key == "escape":
+            event.prevent_default()
+            self.dismiss(None)
+
+
+class PresetScreen(ModalScreen[dict | None]):
+    """Pick a saved QE (or user-defined) search preset."""
+
+    CSS = """
+    PresetScreen {
+        align: center middle;
+    }
+
+    #dialog {
+        width: 90;
+        height: 24;
+        border: thick $background 80%;
+        background: $surface;
+    }
+
+    #preset_title {
+        height: 1;
+        content-align: center middle;
+    }
+
+    #preset_hint {
+        height: 1;
+        content-align: center middle;
+        color: $text-muted;
+    }
+
+    DataTable {
+        height: 1fr;
+    }
+    """
+
+    def __init__(self, presets: list[dict], **kwargs) -> None:
+        super().__init__(**kwargs)
+        self._presets = presets
+
+    def compose(self) -> ComposeResult:
+        yield Vertical(
+            Label("[b]Search presets[/b]", id="preset_title"),
+            Label("Enter to apply · Escape to cancel", id="preset_hint"),
+            DataTable(zebra_stripes=True),
+            id="dialog",
+        )
+
+    def on_mount(self) -> None:
+        table = self.query_one(DataTable)
+        table.cursor_type = "row"
+        table.add_columns("Name", "Pattern", "Context")
+        for p in self._presets:
+            table.add_row(
+                p.get("name", ""),
+                p.get("pattern", ""),
+                str(p.get("context", 0)),
+            )
+        table.focus()
+
+    def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
+        idx = event.cursor_row
+        if 0 <= idx < len(self._presets):
+            self.dismiss(self._presets[idx])
+        else:
+            self.dismiss(None)
+
+    def on_key(self, event) -> None:
+        if event.key == "escape":
+            event.prevent_default()
+            self.dismiss(None)
+
+
 class GroupNodesApp(App):
     """Textual app that displays nodes in a given AiiDA group."""
 
@@ -248,6 +381,12 @@ class GroupNodesApp(App):
         Binding("i", "tag_inspector", "Tag Inspector", show=True),
         Binding("e", "export_tagged", "Export", show=True),
         Binding("slash", "search", "Search", show=True),
+        Binding("n", "next_match", "Next match", show=False),
+        Binding("N", "prev_match", "Prev match", show=False),
+        Binding("L", "last_match", "Last match", show=False),
+        Binding("F", "toggle_filter", "Filter matches", show=False),
+        Binding("p", "presets", "Presets", show=False),
+        Binding("f", "open_pager", "Open in pager", show=False),
     ]
 
     def __init__(self, group_identifier: str | None = None, **kwargs) -> None:
@@ -299,6 +438,22 @@ class GroupNodesApp(App):
         repo_root = package_dir.parent
         data_dir = repo_root / "data"
         data_dir.mkdir(exist_ok=True)
+
+        # In-file search state (file_view mode)
+        self._file_full_lines: list[str] = []
+        self._file_content_cache: dict[tuple[int, str, str], str] = {}
+        self._search_pattern: str = ""
+        self._search_context: int = 5
+        self._search_matches: list[int] = []  # source line indices of matches
+        self._search_current: int = -1
+        self._filter_mode: bool = False
+        self._display_to_source: list[int] = []  # in filter mode, display-line -> source-line
+        self._source_to_display: dict[int, int] = {}
+        self._file_header_line_count: int = 0  # how many header lines prepend the content
+
+        self.presets_file = data_dir / "qe_patterns.json"
+        self.search_presets: list[dict] = []
+        self._load_or_seed_presets()
 
         self.tags_file = data_dir / "tags.json"
         self.tags: dict[int, str] = {}  # Map node PK to tag name
@@ -784,6 +939,8 @@ class GroupNodesApp(App):
         self.current_file = filename
         self.current_file_type = file_type
 
+        self._reset_search_state()
+
         # Build header
         header = "=" * 80 + "\n"
         if file_type == "output":
@@ -791,6 +948,7 @@ class GroupNodesApp(App):
         else:
             header += f"FILE: {filename} (input file)\n"
         header += "=" * 80 + "\n"
+        self._file_header_line_count = header.count("\n")
 
         if file_type == "output":
             content = get_file_content(
@@ -803,12 +961,217 @@ class GroupNodesApp(App):
 
         if file_type == "output":
             self._set_breadcrumb_title(
-                f"Last {self.preview_lines} lines | m/l to adjust | 'b' to go back"
+                f"Last {self.preview_lines} lines | m/l to adjust | '/' search | 'b' back"
             )
         else:
-            self._set_breadcrumb_title("Input file | 'b' to go back")
+            self._set_breadcrumb_title("Input file | '/' search | 'b' to go back")
 
         self.detail_view.focus()
+
+    def _reset_search_state(self) -> None:
+        """Clear per-file search/filter state."""
+        self._search_pattern = ""
+        self._search_matches = []
+        self._search_current = -1
+        self._filter_mode = False
+        self._display_to_source = []
+        self._source_to_display = {}
+        self._file_full_lines = []
+
+    def _load_or_seed_presets(self) -> None:
+        """Load QE search presets, seeding a default file if missing."""
+        default_presets = [
+            {"name": "JOB DONE", "pattern": "JOB DONE", "context": 3},
+            {"name": "total magnetization", "pattern": "total magnetization", "context": 2},
+            {"name": "Forces acting on atoms", "pattern": "Forces acting on atoms", "context": 20},
+            {"name": "total energy (!)", "pattern": "!    total energy", "context": 1},
+            {"name": "convergence achieved", "pattern": "convergence has been achieved", "context": 3},
+            {"name": "error block (%%%%)", "pattern": "%%%%", "context": 10},
+            {"name": "CRASH", "pattern": "CRASH", "context": 20},
+            {"name": "SCF iteration", "pattern": "iteration #", "context": 1},
+        ]
+        if not self.presets_file.exists():
+            try:
+                with open(self.presets_file, "w") as f:
+                    json.dump({"presets": default_presets}, f, indent=2)
+                self.search_presets = default_presets
+                return
+            except OSError as e:
+                logging.error(f"Could not seed presets file: {e}")
+                self.search_presets = default_presets
+                return
+        try:
+            with open(self.presets_file, "r") as f:
+                data = json.load(f)
+            presets = data.get("presets", []) if isinstance(data, dict) else []
+            self.search_presets = [p for p in presets if isinstance(p, dict) and p.get("pattern")]
+        except (json.JSONDecodeError, ValueError, OSError) as e:
+            logging.error(f"Error loading presets: {e}")
+            self.search_presets = default_presets
+
+    def _load_full_file_content(self) -> str:
+        """Return the full text of the currently viewed file (cached)."""
+        if not self.current_node or not self.current_file or not self.current_file_type:
+            return ""
+        key = (self.current_node.pk, self.current_file, self.current_file_type)
+        if key in self._file_content_cache:
+            return self._file_content_cache[key]
+        content = get_full_file_content(
+            self.current_node, self.current_file, self.current_file_type
+        )
+        self._file_content_cache[key] = content
+        return content
+
+    def _run_file_search(self, pattern: str, context: int) -> None:
+        """Search the full file for a pattern and render results."""
+        if self.mode != "file_view" or not self.current_file:
+            return
+
+        content = self._load_full_file_content()
+        if content.startswith("[Error") or content.startswith("[No "):
+            self.notify(content, severity="error")
+            return
+
+        lines = content.splitlines()
+        self._file_full_lines = lines
+        self._search_pattern = pattern
+        self._search_context = context
+
+        pat_lower = pattern.lower()
+        self._search_matches = [
+            i for i, line in enumerate(lines) if pat_lower in line.lower()
+        ]
+
+        if not self._search_matches:
+            self._search_current = -1
+            self.notify(f"No matches for '{pattern}'")
+            self._render_file_view()
+            self._update_search_title()
+            return
+
+        self._search_current = 0
+        self._render_file_view()
+        self._jump_to_current_match()
+
+    def _render_file_view(self) -> None:
+        """Rebuild detail_view.text from current state (scroll or filter mode)."""
+        assert self.detail_view is not None
+        if self._filter_mode and self._search_matches:
+            self._render_filter_view()
+        else:
+            self._render_scroll_view()
+
+    def _render_scroll_view(self) -> None:
+        """Render the full file content with a simple header."""
+        assert self.detail_view is not None
+        lines = self._file_full_lines
+        header = "=" * 80 + "\n"
+        header += f"FILE: {self.current_file} (full file, {len(lines)} lines)\n"
+        if self._search_pattern:
+            header += (
+                f"SEARCH: '{self._search_pattern}'  matches: {len(self._search_matches)}\n"
+            )
+        header += "=" * 80 + "\n"
+        self._file_header_line_count = header.count("\n")
+        self._display_to_source = []
+        self._source_to_display = {}
+        for i in range(len(lines)):
+            display_line = self._file_header_line_count + i
+            self._display_to_source.append(i)
+            self._source_to_display[i] = display_line
+        self.detail_view.text = header + "\n".join(lines)
+
+    def _render_filter_view(self) -> None:
+        """Render only match lines with ±context lines, separated by '---' markers."""
+        assert self.detail_view is not None
+        lines = self._file_full_lines
+        ctx = self._search_context
+        # Merge overlapping match windows into blocks.
+        blocks: list[tuple[int, int]] = []
+        for m in self._search_matches:
+            start = max(0, m - ctx)
+            end = min(len(lines) - 1, m + ctx)
+            if blocks and start <= blocks[-1][1] + 1:
+                blocks[-1] = (blocks[-1][0], max(blocks[-1][1], end))
+            else:
+                blocks.append((start, end))
+
+        header = "=" * 80 + "\n"
+        header += (
+            f"FILTER: '{self._search_pattern}'  matches: {len(self._search_matches)}  "
+            f"context: ±{ctx}\n"
+        )
+        header += "Press F to return to full-file view.\n"
+        header += "=" * 80 + "\n"
+        self._file_header_line_count = header.count("\n")
+
+        out_lines: list[str] = []
+        self._display_to_source = []
+        self._source_to_display = {}
+        current_display = self._file_header_line_count
+
+        for bi, (s, e) in enumerate(blocks):
+            if bi > 0:
+                out_lines.append(f"--- [lines {s + 1}-{e + 1}] ---")
+                self._display_to_source.append(-1)
+                current_display += 1
+            for src in range(s, e + 1):
+                out_lines.append(f"{src + 1:>6}: {lines[src]}")
+                self._display_to_source.append(src)
+                self._source_to_display[src] = current_display
+                current_display += 1
+
+        self.detail_view.text = header + "\n".join(out_lines)
+
+    def _jump_to_current_match(self) -> None:
+        """Scroll to and highlight the current match."""
+        assert self.detail_view is not None
+        if not self._search_matches or self._search_current < 0:
+            return
+        src_line = self._search_matches[self._search_current]
+        disp_line = self._source_to_display.get(src_line)
+        if disp_line is None:
+            # Re-render if match isn't in current display (shouldn't happen, guard anyway)
+            self._render_file_view()
+            disp_line = self._source_to_display.get(src_line)
+            if disp_line is None:
+                return
+        pat_len = len(self._search_pattern)
+        # Find the column where the pattern starts on this line (case-insensitive)
+        displayed_text = ""
+        try:
+            displayed_text = self.detail_view.document.get_line(disp_line)
+        except Exception:
+            displayed_text = ""
+        col = displayed_text.lower().find(self._search_pattern.lower())
+        if col < 0:
+            col = 0
+        try:
+            self.detail_view.selection = (
+                (disp_line, col),
+                (disp_line, col + pat_len),
+            )
+        except Exception:
+            try:
+                self.detail_view.cursor_location = (disp_line, col)
+            except Exception:
+                pass
+        self._update_search_title()
+
+    def _update_search_title(self) -> None:
+        """Reflect current match counter in the title."""
+        if not self._search_pattern:
+            return
+        n = len(self._search_matches)
+        if n == 0:
+            suffix = f"'{self._search_pattern}' — no matches"
+        else:
+            mode = "filter" if self._filter_mode else "scroll"
+            suffix = (
+                f"'{self._search_pattern}' — {self._search_current + 1}/{n} "
+                f"({mode}) | n/N next/prev · L last · F filter · Esc clear"
+            )
+        self._set_breadcrumb_title(suffix)
 
     def action_refresh(self) -> None:
         """Reload the current view."""
@@ -1283,10 +1646,12 @@ class GroupNodesApp(App):
         self.notify(f"Exported {len(tagged_pks)} tagged PKs → {export_path}")
 
     def action_search(self) -> None:
-        """Toggle search/filter bar for table views."""
+        """Toggle search/filter bar for table views, or open file search in file_view."""
+        if self.mode == "file_view":
+            self._open_file_search_prompt()
+            return
+
         if self.mode not in ("groups", "nodes", "descendants", "file_list"):
-            if self.mode == "file_view":
-                self.notify("Search not available while viewing a file")
             return
 
         search_input = self.query_one("#search_input", Input)
@@ -1302,6 +1667,107 @@ class GroupNodesApp(App):
             search_input.visible = True
             search_input.value = ""
             search_input.focus()
+
+    def _open_file_search_prompt(self) -> None:
+        """Push the FileSearchScreen modal to collect pattern + context."""
+        def on_result(result: tuple[str, int] | None) -> None:
+            if not result:
+                return
+            pattern, context = result
+            self._run_file_search(pattern, context)
+
+        self.push_screen(
+            FileSearchScreen(
+                initial_pattern=self._search_pattern,
+                initial_context=self._search_context,
+            ),
+            on_result,
+        )
+
+    def action_next_match(self) -> None:
+        """Jump to next match in the current file view."""
+        if self.mode != "file_view" or not self._search_matches:
+            return
+        self._search_current = (self._search_current + 1) % len(self._search_matches)
+        self._jump_to_current_match()
+
+    def action_prev_match(self) -> None:
+        """Jump to previous match in the current file view."""
+        if self.mode != "file_view" or not self._search_matches:
+            return
+        self._search_current = (self._search_current - 1) % len(self._search_matches)
+        self._jump_to_current_match()
+
+    def action_last_match(self) -> None:
+        """Jump to the last match — useful for QE outputs where later iterations matter."""
+        if self.mode != "file_view" or not self._search_matches:
+            return
+        self._search_current = len(self._search_matches) - 1
+        self._jump_to_current_match()
+
+    def action_toggle_filter(self) -> None:
+        """Switch between scroll view (full file) and filter view (matches + context)."""
+        if self.mode != "file_view":
+            return
+        if not self._search_matches:
+            self.notify("Run a search first (/)")
+            return
+        self._filter_mode = not self._filter_mode
+        self._render_file_view()
+        self._jump_to_current_match()
+
+    def action_presets(self) -> None:
+        """Show QE preset picker; on selection run the search."""
+        if self.mode != "file_view":
+            self.notify("Presets only work while viewing a file")
+            return
+        if not self.search_presets:
+            self.notify("No presets available (check data/qe_patterns.json)")
+            return
+
+        def on_preset(preset: dict | None) -> None:
+            if not preset:
+                return
+            pattern = preset.get("pattern", "").strip()
+            if not pattern:
+                return
+            try:
+                context = max(0, int(preset.get("context", 5)))
+            except (TypeError, ValueError):
+                context = 5
+            self._run_file_search(pattern, context)
+
+        self.push_screen(PresetScreen(self.search_presets), on_preset)
+
+    def action_open_pager(self) -> None:
+        """Suspend the app and open the current file in $PAGER (default 'less -R')."""
+        if self.mode != "file_view" or not self.current_file:
+            self.notify("Pager only works while viewing a file")
+            return
+
+        content = self._load_full_file_content()
+        if not content:
+            self.notify("No content to display", severity="warning")
+            return
+
+        pager = os.environ.get("PAGER") or ("less -R" if shutil.which("less") else None)
+        if not pager:
+            self.notify("No PAGER available (install 'less' or set $PAGER)", severity="error")
+            return
+
+        tmp = tempfile.NamedTemporaryFile(
+            mode="w", suffix=f"_{self.current_file.replace('/', '_')}", delete=False
+        )
+        try:
+            tmp.write(content)
+            tmp.close()
+            with self.suspend():
+                subprocess.call(pager.split() + [tmp.name])
+        finally:
+            try:
+                os.unlink(tmp.name)
+            except OSError:
+                pass
 
     def on_input_changed(self, event: Input.Changed) -> None:
         """Filter table rows as user types in search bar."""
@@ -1322,7 +1788,7 @@ class GroupNodesApp(App):
             self.table.focus()
 
     def on_key(self, event) -> None:
-        """Handle Escape to close search bar."""
+        """Handle Escape to close search bar or clear in-file search."""
         if event.key == "escape" and self._search_active:
             event.prevent_default()
             search_input = self.query_one("#search_input", Input)
@@ -1331,6 +1797,20 @@ class GroupNodesApp(App):
             search_input.value = ""
             self._apply_search_filter("")
             self.table.focus()
+            return
+
+        if (
+            event.key == "escape"
+            and self.mode == "file_view"
+            and (self._search_pattern or self._filter_mode)
+            and self.current_node
+            and self.current_file
+            and self.current_file_type
+        ):
+            event.prevent_default()
+            self.show_file_content(
+                self.current_node, self.current_file, self.current_file_type
+            )
 
     def _row_matches_tag_filter(self, row: tuple) -> bool:
         """Return True if row passes the current tag filter (all/tagged/untagged)."""

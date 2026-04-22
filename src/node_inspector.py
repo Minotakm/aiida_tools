@@ -89,6 +89,20 @@ def get_file_content(
         return f"[Error reading file: {e}]"
 
 
+def get_full_file_content(node: CalcJobNode, filename: str, file_type: str) -> str:
+    """Return the complete content of a retrieved or input file as a string."""
+    try:
+        if file_type == "output":
+            if not hasattr(node, "outputs") or not hasattr(node.outputs, "retrieved"):
+                return "[No retrieved folder found]"
+            return node.outputs.retrieved.get_object_content(filename)
+        if hasattr(node, "base") and hasattr(node.base, "repository"):
+            return node.base.repository.get_object_content(filename)
+        return "[Repository not accessible]"
+    except Exception as e:
+        return f"[Error reading file: {e}]"
+
+
 def get_input_files(node: CalcJobNode) -> list[str]:
     """List available input files from the repository folder.
 
