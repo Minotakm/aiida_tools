@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+
+# Tooling
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Notebooks (kept out of history deliberately)
+*.ipynb
+
+# Runtime artefacts
+*.aiida_tui_debug.log
+.aiida_tui_debug.log
+data/export_*.txt
+data/*.corrupt-*
+
+# Claude Code
+CLAUDE.md
+CLAUDE.local.md
+.claude/

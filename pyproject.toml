@@ -28,17 +28,19 @@ requires-python = ">=3.9"
 dependencies = [
     "aiida-core>=2.0",
     "textual>=0.40.0",
+    "platformdirs>=3.0",
 ]
 
 [project.optional-dependencies]
 dev = [
     "pytest",
     "pytest-cov",
+    "pytest-asyncio",
     "pre-commit",
 ]
 
 [project.scripts]
-aiida-error-inspector = "src.main:main"
+aiida-error-inspector = "aiida_error_inspector.main:main"
 
 [project.urls]
 Homepage = "https://github.com/Minotakm/aiida_tools"
@@ -47,7 +49,14 @@ Issues = "https://github.com/Minotakm/aiida_tools/issues"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["src*"]
+include = ["aiida_error_inspector*"]
 
 [tool.setuptools.package-data]
 aiida_error_inspector = ["py.typed"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+markers = ["db: needs a temporary AiiDA profile"]
+asyncio_mode = "auto"
+filterwarnings = ["ignore::DeprecationWarning"]

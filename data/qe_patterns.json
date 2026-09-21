@@ -1,0 +1,44 @@
+{
+  "presets": [
+    {
+      "name": "JOB DONE",
+      "pattern": "JOB DONE",
+      "context": 3
+    },
+    {
+      "name": "total magnetization",
+      "pattern": "total magnetization",
+      "context": 2
+    },
+    {
+      "name": "Forces acting on atoms",
+      "pattern": "Forces acting on atoms",
+      "context": 20
+    },
+    {
+      "name": "total energy (!)",
+      "pattern": "!    total energy",
+      "context": 1
+    },
+    {
+      "name": "convergence achieved",
+      "pattern": "convergence has been achieved",
+      "context": 3
+    },
+    {
+      "name": "error block (%%%%)",
+      "pattern": "%%%%",
+      "context": 10
+    },
+    {
+      "name": "Error in routine",
+      "pattern": "Error in routine",
+      "context": 10
+    },
+    {
+      "name": "SCF iteration",
+      "pattern": "iteration #",
+      "context": 1
+    }
+  ]
+}

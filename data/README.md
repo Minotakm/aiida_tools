@@ -1,29 +1,85 @@
-# AiiDA Inspector Data Files
+# AiiDA Error Inspector — data files
 
-This directory contains standalone data files used by the AiiDA Error Inspector TUI application.
+Persistent state for the TUI. These are plain JSON so you can read, edit, diff
+and share them; keeping them in version control gives you a history of how a
+campaign's failures were classified.
 
-## Files
+The directory is chosen in this order: `--data-dir`, `$AIIDA_ERROR_INSPECTOR_DATA`,
+this `data/` directory when running from a source checkout, then the platform
+user-data directory.
 
-### `tags.json`
-Stores the mapping between AiiDA workchain PKs and their assigned error tags.
-- **Format**: `{"workchain_pk": "tag_name", ...}`
-- **Editable**: Yes, you can manually add or remove tags
+## `tags.json`
 
-### `patterns.json`
-Contains error patterns for automatic tagging of failed calculations.
-- **Format**: `{"tag_name": {"filename": "output_file", "pattern": "error_pattern"}, ...}`
-- **Editable**: Yes, you can add custom error patterns
-- **Example**: `{"bfgs_error": {"filename": "aiida.out", "pattern": "BFGS history already reset"}}`
+Which workchains carry which tags.
 
-### `categorized.json`
-Tracks which workchains have been categorized/tagged (to avoid re-processing).
-- **Format**: `[workchain_pk1, workchain_pk2, ...]`
-- **Editable**: Yes, but be careful - removing entries will cause re-categorization
+```json
+{
+  "version": 2,
+  "tags": {
+    "SCF convergence issue": [8378, 9270, 20266],
+    "exit 305": [8378]
+  }
+}
+```
 
-## Usage
+A PK may appear under several tags — a calculation can fail for more than one
+reason. Two older layouts are still read automatically: a bare
+`{tag: [pks]}` object, and the original `{"pk": "tag"}` mapping.
 
-These files are automatically managed by the AiiDA Error Inspector TUI, but you can:
-- Open and inspect them directly
-- Manually edit patterns to add new error categories
-- Share patterns with colleagues
-- Version control them to track error categorization over time
+## `patterns.json`
+
+The rules that assign tags. Three kinds:
+
+```jsonc
+{
+  "SCF convergence issue": {
+    "kind": "substring",              // default; may be omitted
+    "filename": "aiida.out",
+    "pattern": "convergence NOT achieved"
+  },
+  "QE routine error": {
+    "kind": "regex",
+    "filename": "aiida.out",
+    "pattern": "Error in routine\\s+(\\w+)",
+    "case_sensitive": true
+  },
+  "exit 305": {
+    "kind": "exit_code",
+    "exit_code": 305                  // reads no files at all
+  }
+}
+```
+
+Entries with no `kind` are read as `substring`, so files written by earlier
+versions keep working unchanged.
+
+## `scanned.json`
+
+The scan cache: which classifiers each workchain has already been tested
+against.
+
+```json
+{"8378": ["a1b2c3d4e5f60718", "0f1e2d3c4b5a6978"]}
+```
+
+This records *misses* as well as matches, so adding a new pattern only reads
+files for that pattern, and re-running a scan with no changes is nearly free.
+Delete an entry to force that workchain to be re-examined.
+
+Supersedes `categorized.json`, which stored only matched PKs and therefore
+re-read every unmatched workchain on every scan. An existing `categorized.json`
+is migrated automatically on first run and then left alone.
+
+## `settings.json`
+
+`preview_lines` (how many lines of an output file to show) and `max_calcjobs`
+(how many failing CalcJobs per workchain a scan inspects).
+
+## `qe_patterns.json`
+
+Search presets offered by `p` in the file viewer. Editable.
+
+## `export_*.txt` / `.csv` / `.json`
+
+Written by `e`. Includes the **unclassified** PKs as well as the tagged ones —
+that is the set that still needs attention.

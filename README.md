@@ -1,100 +1,145 @@
-# AiiDA Groups and Nodes TUI
+# AiiDA Error Inspector
 
-A Terminal User Interface (TUI) for browsing AiiDA groups, nodes, and inspecting calculation outputs.
+A terminal UI for triaging failed AiiDA workchains.
 
-## Features
+High-throughput campaigns produce failures in bulk, and AiiDA tells you *that* a
+workchain failed while the actual reason sits several levels down — in the
+output file of a calculation the workchain called, possibly indirectly. This
+tool closes that gap: browse the failure tree, read one representative output,
+then turn that single observation into a group-wide classification that persists
+between sessions.
 
-- Browse AiiDA groups
-- View nodes within groups
-- Navigate through process descendants
-- View output files (aiida.out, scheduler outputs) and input files (aiida.in, _aiidasubmit.sh)
-- Adjust preview lines dynamically
-- **Tag and categorize errors** - Find error patterns and automatically tag all matching calculations
-- Sort failed/problematic calculations at the top
-- Persistent tags stored in `~/.aiida_tui_tags.json`
+```
+ PK  Type/Formula      State      Exit  Tag          │ Call graph · 4 called, 4 failed
+ 6   PwRelaxWorkChain  excepted   -                  │ ▼ PwRelaxWorkChain<1> Finished [401] 1:while_(…)
+ 1   PwRelaxWorkChain  finished   401   SCF conver…  │ └─ ▼ PwBaseWorkChain<2> | relax Finished [410]
+ 7   PwRelaxWorkChain  finished   0     -            │    ├─ PwCalculation<3> | iteration_01 Fin [305]
+                                                     │    ├─ PwCalculation<4> | iteration_02 Fin [305]
+                                                     │    ├─ PwCalculation<5> | iteration_03 Excepted
+│    └─ inputs (3)
+│         structure:  StructureData<9>  Ca2N
+│         parameters: Dict<11>
+│         kpoints:    KpointsData<12>
+```
 
-## Requirements
+## Install
 
 ```bash
-pip install aiida-core textual
+pip install -e ".[dev]"
 ```
 
-## Usage
+Requires a working AiiDA profile (`aiida-core >= 2.0`).
+
+## Run
 
 ```bash
-# Start TUI and browse all groups
-python src/main.py
+aiida-error-inspector                    # browse every core group
+aiida-error-inspector "my-group"         # open a group by label
+aiida-error-inspector 123                # ...or by PK / UUID
 
-# Start TUI with a specific group
-python src/main.py "my-group-label"
-python src/main.py 123  # by PK
+aiida-error-inspector --data-dir ~/tags  # where tags and rules are kept
+aiida-error-inspector --profile other    # a non-default AiiDA profile
+aiida-error-inspector --debug            # verbose log in the data directory
 ```
 
-## Navigation
+## How triage works
 
-### Keybindings
+1. Open a group. Failures sort to the top, colour-coded: red for
+   excepted/killed, yellow for a non-zero exit code.
+2. Press `w` for the **workflow tree** on the right — the same shape as
+   `verdi process status`, following whatever the cursor is on. `W` focuses it;
+   `Enter` on any node opens it, so you can jump straight to the calculation
+   that actually failed.
+3. Each process carries collapsed `inputs`/`outputs` branches with its full
+   provenance — the structure that went in, the parameters, the relaxed
+   structure that came out. `Enter` on a **StructureData** shows formula, cell,
+   volume, density, sites and extras; `Enter` on a `Dict` shows its contents.
+   `D` hides the data nodes if you want just the call graph.
+4. Press `d` on a row for a **failure summary** — exit status and message, the
+   exception traceback, the failing call chain, and the tail of the scheduler
+   error — without drilling down at all.
+5. If you need the raw file, press `a` to walk down to the calculation and open
+   any retrieved file.
+6. Press `t` to turn what you found into a rule, `E` to classify by exit code,
+   then `u` to re-scan as new failures arrive.
+7. Press `S` for the campaign breakdown: how many are classified, what is
+   killing the rest.
 
-| Key | Action | Description |
-|-----|--------|-------------|
-| `a` | Select | Select group/node and drill down |
-| `b` | Back | Go back to previous view |
-| `r` | Refresh | Reload current view |
-| `m` | More lines | Increase preview lines for output files |
-| `l` | Fewer lines | Decrease preview lines for output files |
-| `t` | Tag Error | Tag current calculation and scan for similar errors |
-| `q` | Quit | Exit the application |
+### Classification rules
 
-### Workflow
+Three kinds, all stored in `data/patterns.json`:
 
-1. **Groups View** - Browse all AiiDA core groups
-2. **Nodes View** - Select a group (`a`) to see all nodes
-3. **Descendants View** - Select a node (`a`) to see called processes
-4. **File List View** - Select a CalcJob (`a`) to see available files
-5. **File View** - Select a file (`a`) to view its content
+| Kind | Matches | Reads files? |
+|---|---|---|
+| `substring` | plain text in a named file (default) | yes |
+| `regex` | a regular expression in a named file | yes |
+| `exit_code` | the failing calculation's exit status | **no** |
 
-## Error Tagging Workflow
+Exit-code rules need no file access at all, so `E` → `Ctrl+A` can classify an
+entire group at query speed — including workchains that never produced output.
 
-The tagging feature helps you categorize and track calculations with similar errors:
+A workchain can carry several tags; a failure often has more than one symptom.
 
-1. **Find an error** - Navigate to a failed CalcJob and view its output file
-2. **Press `t`** - Opens tag dialog
-3. **Enter tag name** - Give it a descriptive name (e.g., "memory_error", "scf_not_converged")
-4. **Enter search pattern** - Type the error message or pattern to search for (e.g., "OOM", "convergence not achieved")
-5. **Automatic scan** - The TUI scans all CalcJobs in the current scope (group or workchain) and tags matching ones
-6. **View tags** - Tagged calculations show their tag in the "Tag" column
-7. **Tags persist** - Tags are saved to `~/.aiida_tui_tags.json` and persist across sessions
+### The scan cache
 
-**Example use case:**
-- You have 500 failed calculations
-- You spot "BFGS history already reset" in one output
-- Press `t`, enter tag "bfgs_error" and pattern "BFGS history already reset"
-- All 47 calculations with this error are now tagged
-- You can visually identify and track this error category
+`data/scanned.json` records which rules each workchain has already been tested
+against — misses included. Adding a fourth pattern therefore reads files only
+for that pattern, and re-running an unchanged scan costs almost nothing.
 
-## File Structure
+## Keys
+
+Press `?` in the app for the full list, grouped by context. The footer only
+advertises keys that do something where you are.
+
+| Key | Action |
+|---|---|
+| `a` / `Enter` | Select — drill down |
+| `b` / `Backspace` | Back |
+| `/` | Filter rows, or search inside a file |
+| `T` | Cycle tag filter: all → tagged → untagged |
+| `w` / `W` | Toggle / focus the workflow tree panel |
+| `D` | Show or hide data nodes in the tree |
+| `v` | Inspect the data node under the cursor (structure, Dict, ...) |
+| `d` | Failure summary for the row under the cursor |
+| `t` | Create a rule from the open file |
+| `E` | Tag by exit code (`Ctrl+A` inside: auto-tag every code) |
+| `u` | Re-scan with every saved rule |
+| `x` | Remove all tags from a row |
+| `i` | Tag inspector — counts and the rule behind each tag |
+| `S` | Statistics for the group |
+| `e` | Export (txt + csv + json, including the unclassified set) |
+| `n` `N` `L` `F` | Next / previous / last match; toggle filtered view |
+| `p` | Search presets |
+| `f` | Open the current file in `$PAGER` |
+| `m` / `l` | More / fewer preview lines |
+| `Escape` | Dismiss a panel, clear a search, or cancel a running scan |
+| `?` / `q` | Help / quit |
+
+## Layout
 
 ```
-src/
-├── main.py              # Entry point
-├── app.py               # Main TUI application
-├── queries.py           # AiiDA database queries
-└── node_inspector.py    # File inspection utilities
+aiida_error_inspector/
+├── main.py            CLI entry point, logging, profile loading
+├── app.py             the Textual UI
+├── traversal.py       walking the call graph and data provenance
+├── datainfo.py        human-readable summaries of data nodes
+├── classify.py        the rules (substring / regex / exit code)
+├── scan.py            the scan engine — no AiiDA or Textual imports
+├── node_inspector.py  streaming access to repository files
+├── storage.py         atomic JSON persistence
+└── queries.py         group and node queries
+tests/                 pytest; DB tests use a throwaway sqlite profile
 ```
 
-## Files Displayed
+`classify.py`, `scan.py` and `storage.py` import neither AiiDA nor Textual,
+which is what lets most of the suite run without a profile.
 
-The TUI shows both input and output files:
+## Tests
 
-**Output files** (from retrieved folder):
-- `aiida.out` - Main calculation output (last N lines shown, default: 500)
-- `_scheduler-stdout.txt` - Scheduler standard output
-- `_scheduler-stderr.txt` - Scheduler error output
+```bash
+pytest                  # everything
+pytest -m "not db"      # skip the ones needing a temporary profile
+```
 
-**Input files** (from repository, full file shown):
-- `aiida.in` - Input file submitted to the code
-- `_aiidasubmit.sh` - Submission script
-
-Use `m` and `l` keys to adjust the number of preview lines for output files.
-- `_scheduler-stderr.txt` - Scheduler standard error
-
-Use `+`/`-` to adjust how many lines are shown (increments of 20).
+DB-marked tests spin up a temporary `core.sqlite_dos` profile, so no PostgreSQL
+is required.
