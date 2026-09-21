@@ -182,3 +182,15 @@ def test_group_by_file_buckets_one_read_per_file():
 def test_describe():
     assert Classifier(tag="t", kind="exit_code", exit_code=305).describe() == "exit_status == 305"
     assert "contains" in Classifier(tag="t", filename="f", pattern="p").describe()
+
+
+def test_empty_file_rule():
+    c = Classifier(tag="no output", kind="empty_file", filename="aiida.out")
+    assert c.needs_file() == "aiida.out"
+    assert c.matches_empty
+    assert not c.matches_text("")
+    assert c.describe() == "aiida.out is empty"
+    assert c.to_json() == {"kind": "empty_file", "filename": "aiida.out"}
+    assert Classifier.from_json("no output", c.to_json()) == c
+    with pytest.raises(ClassifierError):
+        Classifier(tag="t", kind="empty_file")  # no filename

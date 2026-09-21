@@ -314,3 +314,20 @@ def test_no_classifiers_is_a_no_op():
     result = run_scan(ScanRequest(group_label="g", classifiers=()), backend=backend)
     assert result.n_fathers == 0
     assert calls["forest"] == 0
+
+
+def test_empty_output_tags_the_workchain():
+    fathers = [Ref(pk=1), Ref(pk=2), Ref(pk=3)]
+    forest = {1: [Ref(pk=10)], 2: [Ref(pk=20)], 3: [Ref(pk=30)]}
+    nodes = {
+        10: FakeCalcJob(pk=10, retrieved=out(**{"aiida.out": ""})),
+        20: FakeCalcJob(pk=20, retrieved=out(**{"aiida.out": "JOB DONE.\n"})),
+        30: FakeCalcJob(pk=30, retrieved=out(**{"_scheduler-stderr.txt": "oom\n"})),
+    }
+    backend, _ = make_backend(fathers, forest, nodes)
+
+    rule = Classifier(tag="empty aiida.out", kind="empty_file", filename="aiida.out")
+    result = run_scan(ScanRequest(group_label="g", classifiers=(rule,)), backend=backend)
+
+    assert result.new_tags == {1: {"empty aiida.out"}}
+    assert result.missing_file["aiida.out"] == 1

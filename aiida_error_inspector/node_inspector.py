@@ -291,10 +291,14 @@ def search_file(
     matched, so a hit near the top of a large file costs almost nothing. This
     is the primitive that lets a scan read each file once no matter how many
     classifiers target it.
+
+    Empty-file matchers ride along: the first line with any content rules them
+    out, and they match only if the whole file was read without finding one.
     """
-    pending = list(matchers)
+    pending = [m for m in matchers if not getattr(m, "matches_empty", False)]
+    empties = [m for m in matchers if getattr(m, "matches_empty", False)]
     matched: set[str] = set()
-    if not pending:
+    if not pending and not empties:
         return matched
 
     consumed = 0
@@ -303,7 +307,10 @@ def search_file(
             for line in handle:
                 consumed += len(line)
                 if consumed > max_bytes:
+                    empties = []
                     break
+                if empties and line.strip():
+                    empties = []
                 still_pending = []
                 for matcher in pending:
                     if matcher.matches_text(line):
@@ -311,8 +318,9 @@ def search_file(
                     else:
                         still_pending.append(matcher)
                 pending = still_pending
-                if not pending:
+                if not pending and not empties:
                     break
+        matched.update(m.tag for m in empties)
     except FileNotFoundError:
         raise
     except Exception as exc:  # noqa: BLE001

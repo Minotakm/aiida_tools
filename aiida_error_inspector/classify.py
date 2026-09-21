@@ -1,6 +1,6 @@
 """Error classifiers: the rules that decide which tag a failed workchain gets.
 
-Three kinds:
+Four kinds:
 
 ``substring``
     Case-insensitive (by default) substring match against a named file. This is
@@ -12,6 +12,10 @@ Three kinds:
     Match the failing CalcJob's ``exit_status``. Needs **no file read at all**,
     because the exit status comes back projected from the same query that finds
     the CalcJob — so a whole group can be classified by exit code at query speed.
+``empty_file``
+    The named file exists but holds nothing, or only whitespace — e.g. an
+    ``aiida.out`` from a job that died before the code wrote a line. A file that
+    is absent altogether does not match; the scan counts those separately.
 
 Deliberately free of AiiDA and Textual imports so it can be unit-tested.
 """
@@ -27,9 +31,11 @@ from typing import Any, Iterable
 KIND_SUBSTRING = "substring"
 KIND_REGEX = "regex"
 KIND_EXIT_CODE = "exit_code"
-KINDS = (KIND_SUBSTRING, KIND_REGEX, KIND_EXIT_CODE)
+KIND_EMPTY_FILE = "empty_file"
+KINDS = (KIND_SUBSTRING, KIND_REGEX, KIND_EXIT_CODE, KIND_EMPTY_FILE)
 
 _TEXT_KINDS = (KIND_SUBSTRING, KIND_REGEX)
+_FILE_KINDS = (*_TEXT_KINDS, KIND_EMPTY_FILE)
 
 
 class ClassifierError(ValueError):
@@ -70,6 +76,9 @@ class Classifier:
                         f"Tag {self.tag!r}: invalid regex {self.pattern!r} ({exc})"
                     ) from exc
                 object.__setattr__(self, "_regex", compiled)
+        elif self.kind == KIND_EMPTY_FILE:
+            if not self.filename:
+                raise ClassifierError(f"Tag {self.tag!r}: empty_file needs a filename")
         elif self.exit_code is None:
             raise ClassifierError(f"Tag {self.tag!r}: exit_code classifier needs a code")
 
@@ -77,7 +86,12 @@ class Classifier:
 
     def needs_file(self) -> str | None:
         """The file this classifier must read, or None if it reads nothing."""
-        return self.filename if self.kind in _TEXT_KINDS else None
+        return self.filename if self.kind in _FILE_KINDS else None
+
+    @property
+    def matches_empty(self) -> bool:
+        """True for a rule about the whole file being blank, not about a line."""
+        return self.kind == KIND_EMPTY_FILE
 
     def matches_text(self, text: str) -> bool:
         if self.kind == KIND_REGEX:
@@ -146,6 +160,8 @@ class Classifier:
     def to_json(self) -> dict[str, Any]:
         if self.kind == KIND_EXIT_CODE:
             return {"kind": self.kind, "exit_code": self.exit_code}
+        if self.kind == KIND_EMPTY_FILE:
+            return {"kind": self.kind, "filename": self.filename}
         blob: dict[str, Any] = {
             "kind": self.kind,
             "filename": self.filename,
@@ -159,6 +175,8 @@ class Classifier:
         """One-line human description, for the tag inspector."""
         if self.kind == KIND_EXIT_CODE:
             return f"exit_status == {self.exit_code}"
+        if self.kind == KIND_EMPTY_FILE:
+            return f"{self.filename} is empty"
         flavour = "regex" if self.kind == KIND_REGEX else "contains"
         case = "" if self.case_sensitive else " (i)"
         return f"{flavour}{case} {self.pattern!r}"

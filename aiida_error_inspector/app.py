@@ -162,13 +162,15 @@ class ClassifierScreen(ModalScreen[dict | None]):
     }
     """
 
-    KINDS = ("substring", "regex", "exit_code")
+    KINDS = ("substring", "regex", "exit_code", "empty_file")
 
-    def __init__(self, tag_name: str, filename: str, **kwargs) -> None:
+    def __init__(
+        self, tag_name: str, filename: str, *, kind: str = "substring", **kwargs
+    ) -> None:
         super().__init__(**kwargs)
         self.tag_name = tag_name
         self.filename = filename
-        self._kind_index = 0
+        self._kind_index = self.KINDS.index(kind)
         self._case_sensitive = False
 
     @property
@@ -200,6 +202,7 @@ class ClassifierScreen(ModalScreen[dict | None]):
             "substring": f"plain text match, case {case}",
             "regex": f"regular expression, case {case}",
             "exit_code": "matches the failing CalcJob's exit status — no file is read",
+            "empty_file": f"matches when {self.filename} is blank — just press Enter",
         }[self.kind]
         self.query_one("#case_hint", Label).update(f"  {detail}")
 
@@ -221,6 +224,9 @@ class ClassifierScreen(ModalScreen[dict | None]):
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         value = event.value.strip()
+        if self.kind == "empty_file":
+            self.dismiss({"kind": "empty_file"})
+            return
         if not value:
             self.dismiss(None)
             return
@@ -775,6 +781,7 @@ class GroupNodesApp(App):
         self.available_files = []  # List of (filename, type) tuples
         self.current_file: Optional[str] = None  # Currently selected file
         self.current_file_type: Optional[str] = None  # 'input' or 'output'
+        self.current_file_blank = False  # open file is empty / whitespace only
 
         # Settings - show last 500 lines by default for files
         self.preview_lines = 500
@@ -1396,6 +1403,14 @@ class GroupNodesApp(App):
             header = "=" * 80 + "\n"
             header += f"FILE: {filename} (input file)\n"
         header += "=" * 80 + "\n"
+
+        self.current_file_blank = (
+            not preview.omitted
+            and not preview.truncated
+            and not any(line.strip() for line in preview.head + preview.tail)
+        )
+        if self.current_file_blank:
+            header += "[empty file — press 't' to tag every workchain where it is empty]\n"
         self._file_header_line_count = header.count("\n")
 
         self.detail_view.text = header + preview.render()
@@ -1885,7 +1900,8 @@ class GroupNodesApp(App):
                 self.upsert_classifier(classifier)
                 self.start_scan([classifier], navigate_home=True)
 
-            self.push_screen(ClassifierScreen(tag_name, filename), on_rule)
+            kind = "empty_file" if self.current_file_blank else "substring"
+            self.push_screen(ClassifierScreen(tag_name, filename, kind=kind), on_rule)
 
         self.push_screen(TagNameScreen(), on_tag_name)
 
@@ -1899,7 +1915,7 @@ class GroupNodesApp(App):
             if not result:
                 return
             if result.get("auto"):
-                self.start_auto_exit_code_scan()
+                self.start_auto_exit_code_scan(self.group.label)
                 return
             try:
                 classifier = Classifier(
@@ -1914,7 +1930,7 @@ class GroupNodesApp(App):
         self.push_screen(ExitCodeScreen(), on_result)
 
     @work(thread=True, exclusive=True, group="scan")
-    def start_auto_exit_code_scan(self) -> None:
+    def start_auto_exit_code_scan(self, group_label: str) -> None:
         """Build one exit-code classifier per distinct failing exit status, then scan.
 
         This costs no file reads at all, so it can classify a whole group at
@@ -1922,9 +1938,8 @@ class GroupNodesApp(App):
         """
         from . import traversal
 
-        assert self.group is not None
         try:
-            fathers = traversal.failed_workchains_in_group(self.group.label)
+            fathers = traversal.failed_workchains_in_group(group_label)
             forest = traversal.call_forest([f.pk for f in fathers])
         except Exception as exc:  # noqa: BLE001
             self.call_from_thread(
@@ -1949,7 +1964,7 @@ class GroupNodesApp(App):
             for code in sorted(codes)
         ]
         self.call_from_thread(self._register_classifiers, classifiers)
-        self._scan_in_thread(classifiers, navigate_home=True)
+        self._scan_in_thread(group_label, classifiers, navigate_home=True)
 
     def _register_classifiers(self, classifiers: list[Classifier]) -> None:
         for classifier in classifiers:
@@ -1982,23 +1997,29 @@ class GroupNodesApp(App):
         if not classifiers:
             self.notify("Nothing to scan with", severity="warning")
             return
-        self._scan_worker(list(classifiers), navigate_home)
+        # Read the label here: ORM objects are bound to the thread's DB session,
+        # so self.group must never be touched from the worker.
+        self._scan_worker(self.group.label, list(classifiers), navigate_home)
 
     @work(thread=True, exclusive=True, group="scan")
-    def _scan_worker(self, classifiers: list[Classifier], navigate_home: bool) -> None:
-        self._scan_in_thread(classifiers, navigate_home=navigate_home)
+    def _scan_worker(
+        self, group_label: str, classifiers: list[Classifier], navigate_home: bool
+    ) -> None:
+        self._scan_in_thread(group_label, classifiers, navigate_home=navigate_home)
 
-    def _scan_in_thread(self, classifiers: list[Classifier], *, navigate_home: bool) -> None:
-        """Body of the scan worker. Never touches self.tags or self.scan_cache."""
+    def _scan_in_thread(
+        self, group_label: str, classifiers: list[Classifier], *, navigate_home: bool
+    ) -> None:
+        """Body of the scan worker. Never touches self.tags, self.scan_cache or
+        any ORM object loaded on the UI thread."""
         from textual.worker import get_current_worker
 
-        assert self.group is not None
         worker = get_current_worker()
         # Snapshot: the worker must not read a dict the UI thread can mutate.
         cache_snapshot = {pk: set(fps) for pk, fps in self.scan_cache.items()}
 
         request = ScanRequest(
-            group_label=self.group.label,
+            group_label=group_label,
             classifiers=tuple(classifiers),
             max_calcjobs=self.max_calcjobs,
             max_depth=self.max_depth,

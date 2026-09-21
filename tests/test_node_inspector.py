@@ -170,3 +170,30 @@ def test_search_file_missing_file_raises_for_the_caller_to_count(node):
 def test_search_file_with_no_classifiers_does_no_io(node):
     assert ni.search_file(node, "aiida.out", "output", []) == set()
     assert node.output_repo.open_calls == []
+
+
+@pytest.mark.parametrize("content", ["", "\n\n", "   \n\t\n"])
+def test_search_file_empty_rule_matches_blank_files(content):
+    node = FakeCalcJob(pk=1, retrieved={"aiida.out": content})
+    rule = Classifier(tag="empty", kind="empty_file", filename="aiida.out")
+    assert ni.search_file(node, "aiida.out", "output", [rule]) == {"empty"}
+
+
+def test_search_file_empty_rule_ignores_files_with_content(node):
+    rule = Classifier(tag="empty", kind="empty_file", filename="aiida.out")
+    assert ni.search_file(node, "aiida.out", "output", [rule]) == set()
+
+
+def test_search_file_empty_rule_shares_the_read_with_text_rules(node):
+    rules = [
+        Classifier(tag="empty", kind="empty_file", filename="aiida.out"),
+        Classifier(tag="late", filename="aiida.out", pattern="line 999"),
+    ]
+    assert ni.search_file(node, "aiida.out", "output", rules) == {"late"}
+    assert node.output_repo.open_calls == ["aiida.out"]
+
+
+def test_search_file_empty_rule_does_not_match_a_missing_file(node):
+    rule = Classifier(tag="empty", kind="empty_file", filename="absent.txt")
+    with pytest.raises(FileNotFoundError):
+        ni.search_file(node, "absent.txt", "output", [rule])
