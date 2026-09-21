@@ -85,10 +85,6 @@ def failure_priority(process_state: str | None, exit_status) -> int:
     return 4  # data nodes
 
 
-def failure_sort_key(row: dict) -> tuple[int, int]:
-    return failure_priority(row.get("process_state"), row.get("exit_status")), row["pk"]
-
-
 class TagNameScreen(ModalScreen[str]):
     """Modal screen to get tag name."""
 
@@ -1279,7 +1275,9 @@ class GroupNodesApp(App):
         self.table.cursor_type = "row"
         self.table.add_columns("PK", "Process", "State", "Exit code", "Tag")
 
-        descendants = sorted(get_descendants(node), key=failure_sort_key)
+        # Execution order (PK = creation order), not failures-first: these rows
+        # are the steps of one workchain, e.g. a PwBase and its restarts.
+        descendants = sorted(get_descendants(node), key=lambda row: row["pk"])
         self.nodes_list = [row["pk"] for row in descendants]
 
         rows = [
